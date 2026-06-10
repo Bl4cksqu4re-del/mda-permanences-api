@@ -70,10 +70,10 @@ error: 'Mot de passe requis'
 });
 }
 
-if (password === process.env.API_SECRET) {
+if (password === process.env.API_SECRET || password === process.env.key_api) {
 return res.json({
 success: true,
-token: process.env.API_SECRET
+token: password
 });
 }
 
@@ -96,7 +96,8 @@ error: 'Token manquant'
 });
 }
 
-if (token !== process.env.API_SECRET) {
+const validTokens = [process.env.API_SECRET, process.env.key_api].filter(Boolean);
+if (!validTokens.includes(token)) {
 return res.status(401).json({
 error: 'Token invalide'
 });
@@ -189,6 +190,9 @@ const result = await pool.query(
   INSERT INTO contacts (
     date,
     type,
+    nom,
+    prenom,
+    tags,
     id_adherent,
     id_non_adherent,
     id_ancien_adherent,
@@ -216,13 +220,17 @@ const result = await pool.query(
   VALUES (
     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
     $11,$12,$13,$14,$15,$16,$17,$18,
-    $19,$20,$21,$22,$23,$24,$25
+    $19,$20,$21,$22,$23,$24,$25,$26,
+    $27,$28
   )
   RETURNING *
   `,
   [
     c.date,
     c.type,
+    c.nom || null,
+    c.prenom || null,
+    (c.tags && Array.isArray(c.tags) && c.tags.length > 0) ? c.tags : null,
     !!c.id_adherent,
     !!c.id_non_adherent,
     !!c.id_ancien_adherent,
@@ -281,14 +289,20 @@ const result = await pool.query(
   SET
     date=$1,
     type=$2,
-    remarques=$3,
-    suivi=$4
-  WHERE id=$5
+    nom=$3,
+    prenom=$4,
+    tags=$5,
+    remarques=$6,
+    suivi=$7
+  WHERE id=$8
   RETURNING *
   `,
   [
     c.date,
     c.type,
+    c.nom || null,
+    c.prenom || null,
+    (c.tags && Array.isArray(c.tags) && c.tags.length > 0) ? c.tags : null,
     c.remarques,
     c.suivi,
     id
@@ -453,6 +467,7 @@ const csvContent = [
     headers.map(h => {
       const val = row[h];
       if (val === null) return '';
+      if (Array.isArray(val)) return `"${val.join('; ')}"`;
       if (typeof val === 'string' && (val.includes(',') || val.includes('"') || val.includes('\n'))) {
         return `"${val.replace(/"/g, '""')}"`;
       }
