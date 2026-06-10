@@ -4,7 +4,11 @@ const { Pool } = require('pg');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: ['https://mda-permanences-app.onrender.com', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true
+}));
 app.use(express.json());
 
 const pool = new Pool({
