@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(cors({
@@ -17,24 +19,115 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+const JWT_SECRET = process.env.JWT_SECRET || process.env.API_SECRET || 'mda-secret-2026';
 
-app.post('/login', (req, res) => {
-  const { password } = req.body;
-  if (password === process.env.API_SECRET) {
-    res.json({ token: process.env.API_SECRET });
-  } else {
-    res.status(401).json({ error: 'Mot de passe incorrect' });
-  }
-});
+function hashPassword(pwd) {
+  return crypto.createHash('sha256').update(pwd).digest('hex');
+}
 
 function auth(req, res, next) {
   const token = req.headers['authorization'];
-  if (!token || token !== process.env.API_SECRET) {
-    return res.status(401).json({ error: 'Non autorisé' });
+  if (!token) return res.status(401).json({ error: 'Non autorisé' });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token invalide ou expiré' });
   }
+}
+
+function adminOnly(req, res, next) {
+  if (!req.user || !req.user.is_admin) return res.status(403).json({ error: 'Accès réservé à l\'administrateur' });
   next();
 }
+
+app.get('/health', (req, res) => res.json({ ok: true }));
+
+/* Login */
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Identifiants manquants' });
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE username=$1', [username]);
+    const user = result.rows[0];
+    if (!user || user.password_hash !== hashPassword(password)) {
+      return res.status(401).json({ error: 'Identifiant ou mot de passe incorrect' });
+    }
+    const token = jwt.sign(
+      { id: user.id, username: user.username, display_name: user.display_name, initiales: user.initiales, is_admin: user.is_admin },
+      JWT_SECRET,
+      { expiresIn: '12h' }
+    );
+    res.json({ token, user: { id: user.id, username: user.username, display_name: user.display_name, initiales: user.initiales, is_admin: user.is_admin } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* Changer son mot de passe */
+app.post('/change-password', auth, async (req, res) => {
+  const { current_password, new_password } = req.body;
+  if (!current_password || !new_password) return res.status(400).json({ error: 'Champs manquants' });
+  if (new_password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caractères minimum)' });
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
+    const user = result.rows[0];
+    if (!user || user.password_hash !== hashPassword(current_password)) {
+      return res.status(401).json({ error: 'Mot de passe actuel incorrect' });
+    }
+    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hashPassword(new_password), req.user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* Gestion users (admin) */
+app.get('/users', auth, adminOnly, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, username, display_name, initiales, is_admin, created_at FROM users ORDER BY display_name');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/users', auth, adminOnly, async (req, res) => {
+  const { username, password, display_name, initiales, is_admin } = req.body;
+  if (!username || !password || !display_name || !initiales) return res.status(400).json({ error: 'Champs manquants' });
+  if (password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caractères minimum)' });
+  try {
+    const result = await pool.query(
+      'INSERT INTO users (username, password_hash, display_name, initiales, is_admin) VALUES ($1,$2,$3,$4,$5) RETURNING id, username, display_name, initiales, is_admin',
+      [username, hashPassword(password), display_name, initiales.toUpperCase(), !!is_admin]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') return res.status(400).json({ error: 'Cet identifiant existe déjà' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/users/:id/reset-password', auth, adminOnly, async (req, res) => {
+  const { new_password } = req.body;
+  if (!new_password || new_password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court' });
+  try {
+    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hashPassword(new_password), req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/users/:id', auth, adminOnly, async (req, res) => {
+  if (parseInt(req.params.id) === req.user.id) return res.status(400).json({ error: 'Impossible de supprimer son propre compte' });
+  try {
+    await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.use(auth);
 
@@ -50,21 +143,13 @@ app.get('/motifs-custom', async (req, res) => {
 
 app.post('/motifs-custom', async (req, res) => {
   const { label } = req.body;
-  if (!label || !label.trim()) {
-    return res.status(400).json({ error: 'Le label est obligatoire' });
-  }
+  if (!label || !label.trim()) return res.status(400).json({ error: 'Le label est obligatoire' });
   try {
-    const result = await pool.query(
-      'INSERT INTO motifs_custom (label) VALUES ($1) RETURNING id, label',
-      [label.trim()]
-    );
+    const result = await pool.query('INSERT INTO motifs_custom (label) VALUES ($1) RETURNING id, label', [label.trim()]);
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    if (err.code === '23505') {
-      res.status(400).json({ error: 'Ce motif existe déjà' });
-    } else {
-      res.status(500).json({ error: err.message });
-    }
+    if (err.code === '23505') return res.status(400).json({ error: 'Ce motif existe déjà' });
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -87,12 +172,9 @@ app.get('/contacts', async (req, res) => {
   if (to)   { values.push(to);   conditions.push(`date <= $${values.length}`); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   try {
-    const result = await pool.query(
-      `SELECT * FROM contacts ${where} ORDER BY date DESC, id DESC`, values
-    );
+    const result = await pool.query(`SELECT * FROM contacts ${where} ORDER BY date DESC, id DESC`, values);
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -131,7 +213,6 @@ app.post('/contacts', async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -169,7 +250,6 @@ app.put('/contacts/:id', async (req, res) => {
     );
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -200,7 +280,6 @@ app.get('/stats', async (req, res) => {
     ]);
     res.json({ totals: totals.rows, byType: byType.rows, byDate: byDate.rows, byMotif: byMotif.rows[0], byQui: byQui.rows[0] });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -215,7 +294,7 @@ app.get('/export/csv', async (req, res) => {
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   try {
     const result = await pool.query(`SELECT * FROM contacts ${where} ORDER BY date, id`, values);
-    const headers = ['id','date','type','prénom','nom','adhérent','non-adhérent','ancien adhérent','structure','autres (ID)','déclaration','adjonction','juridique','social','comptable/fiscal','communication','adhésion','activité artistique','autres (motif)','mail','téléphone','CK','KR','LV','remarques/thèmes','suivi','newsletter','comment connu','créé le'];
+    const headers = ['id','date','type','prénom','nom','adhérent','non-adhérent','ancien adhérent','structure','autres (ID)','déclaration','adjonction','juridique','social','comptable/fiscal','communication','adhésion','activité artistique','autres (motif)','mail','téléphone','CK','KR','LV','VC','CC','remarques/thèmes','suivi','newsletter','comment connu','créé le'];
     const rows = result.rows.map(r => [
       r.id, r.date, r.type, r.prenom||'', r.nom||'',
       r.id_adherent?1:'', r.id_non_adherent?1:'', r.id_ancien_adherent?1:'',
