@@ -164,12 +164,18 @@ app.delete('/motifs-custom/:id', async (req, res) => {
 
 /* Contacts */
 app.get('/contacts', async (req, res) => {
-  const { type, from, to } = req.query;
+  const { type, from, to, conseiller, a_rappeler } = req.query;
   const conditions = [];
   const values = [];
   if (type) { values.push(type); conditions.push(`type = $${values.length}`); }
   if (from) { values.push(from); conditions.push(`date >= $${values.length}`); }
   if (to)   { values.push(to);   conditions.push(`date <= $${values.length}`); }
+  if (conseiller) {
+    const col = `qui_${conseiller.toLowerCase()}`;
+    const allowed = ['qui_ck','qui_kr','qui_lv','qui_vc','qui_cc'];
+    if (allowed.includes(col)) conditions.push(`${col} = TRUE`);
+  }
+  if (a_rappeler === '1') conditions.push(`a_rappeler = TRUE`);
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   try {
     const result = await pool.query(`SELECT * FROM contacts ${where} ORDER BY date DESC, id DESC`, values);
@@ -191,10 +197,10 @@ app.post('/contacts', async (req, res) => {
         motif_activite_artistique, motif_autres,
         mail, telephone, qui_ck, qui_kr, qui_lv, qui_vc, qui_cc,
         remarques, suivi, newsletter, comment_connu,
-        prenom, nom, motifs_custom
+        prenom, nom, motifs_custom, a_rappeler
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
+        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
       ) RETURNING *`,
       [
         c.date, c.type,
@@ -208,7 +214,8 @@ app.post('/contacts', async (req, res) => {
         c.remarques || null, c.suivi || null,
         !!c.newsletter, c.comment_connu || null,
         c.prenom || null, c.nom || null,
-        c.motifs_custom && c.motifs_custom.length ? c.motifs_custom : null
+        c.motifs_custom && c.motifs_custom.length ? c.motifs_custom : null,
+        !!c.a_rappeler
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -230,8 +237,8 @@ app.put('/contacts/:id', async (req, res) => {
         motif_adhesion=$14, motif_activite_artistique=$15, motif_autres=$16,
         mail=$17, telephone=$18, qui_ck=$19, qui_kr=$20, qui_lv=$21, qui_vc=$22, qui_cc=$23,
         remarques=$24, suivi=$25, newsletter=$26, comment_connu=$27,
-        prenom=$28, nom=$29, motifs_custom=$30
-      WHERE id=$31 RETURNING *`,
+        prenom=$28, nom=$29, motifs_custom=$30, a_rappeler=$31
+      WHERE id=$32 RETURNING *`,
       [
         c.date, c.type,
         !!c.id_adherent, !!c.id_non_adherent, !!c.id_ancien_adherent,
@@ -245,6 +252,7 @@ app.put('/contacts/:id', async (req, res) => {
         !!c.newsletter, c.comment_connu || null,
         c.prenom || null, c.nom || null,
         c.motifs_custom && c.motifs_custom.length ? c.motifs_custom : null,
+        !!c.a_rappeler,
         req.params.id
       ]
     );
@@ -285,12 +293,18 @@ app.get('/stats', async (req, res) => {
 });
 
 app.get('/export/csv', async (req, res) => {
-  const { from, to, type } = req.query;
+  const { from, to, type, conseiller, a_rappeler } = req.query;
   const conditions = [];
   const values = [];
   if (type) { values.push(type); conditions.push(`type = $${values.length}`); }
   if (from) { values.push(from); conditions.push(`date >= $${values.length}`); }
   if (to)   { values.push(to);   conditions.push(`date <= $${values.length}`); }
+  if (conseiller) {
+    const col = `qui_${conseiller.toLowerCase()}`;
+    const allowed = ['qui_ck','qui_kr','qui_lv','qui_vc','qui_cc'];
+    if (allowed.includes(col)) conditions.push(`${col} = TRUE`);
+  }
+  if (a_rappeler === '1') conditions.push(`a_rappeler = TRUE`);
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   try {
     const result = await pool.query(`SELECT * FROM contacts ${where} ORDER BY date, id`, values);
