@@ -107,12 +107,12 @@ app.post('/contacts', async (req, res) => {
         motif_declaration, motif_adjonction, motif_juridique, motif_social,
         motif_comptable_fiscal, motif_communication, motif_adhesion,
         motif_activite_artistique, motif_autres,
-        mail, telephone, qui_ck, qui_kr, qui_lv,
+        mail, telephone, qui_ck, qui_kr, qui_lv, qui_vc, qui_cc,
         remarques, suivi, newsletter, comment_connu,
         prenom, nom, motifs_custom
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28
+        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
       ) RETURNING *`,
       [
         c.date, c.type,
@@ -122,7 +122,7 @@ app.post('/contacts', async (req, res) => {
         !!c.motif_social, !!c.motif_comptable_fiscal, !!c.motif_communication,
         !!c.motif_adhesion, !!c.motif_activite_artistique, !!c.motif_autres,
         c.mail || null, c.telephone || null,
-        !!c.qui_ck, !!c.qui_kr, !!c.qui_lv,
+        !!c.qui_ck, !!c.qui_kr, !!c.qui_lv, !!c.qui_vc, !!c.qui_cc,
         c.remarques || null, c.suivi || null,
         !!c.newsletter, c.comment_connu || null,
         c.prenom || null, c.nom || null,
@@ -147,10 +147,10 @@ app.put('/contacts/:id', async (req, res) => {
         motif_declaration=$8, motif_adjonction=$9, motif_juridique=$10,
         motif_social=$11, motif_comptable_fiscal=$12, motif_communication=$13,
         motif_adhesion=$14, motif_activite_artistique=$15, motif_autres=$16,
-        mail=$17, telephone=$18, qui_ck=$19, qui_kr=$20, qui_lv=$21,
-        remarques=$22, suivi=$23, newsletter=$24, comment_connu=$25,
-        prenom=$26, nom=$27, motifs_custom=$28
-      WHERE id=$29 RETURNING *`,
+        mail=$17, telephone=$18, qui_ck=$19, qui_kr=$20, qui_lv=$21, qui_vc=$22, qui_cc=$23,
+        remarques=$24, suivi=$25, newsletter=$26, comment_connu=$27,
+        prenom=$28, nom=$29, motifs_custom=$30
+      WHERE id=$31 RETURNING *`,
       [
         c.date, c.type,
         !!c.id_adherent, !!c.id_non_adherent, !!c.id_ancien_adherent,
@@ -159,7 +159,7 @@ app.put('/contacts/:id', async (req, res) => {
         !!c.motif_social, !!c.motif_comptable_fiscal, !!c.motif_communication,
         !!c.motif_adhesion, !!c.motif_activite_artistique, !!c.motif_autres,
         c.mail || null, c.telephone || null,
-        !!c.qui_ck, !!c.qui_kr, !!c.qui_lv,
+        !!c.qui_ck, !!c.qui_kr, !!c.qui_lv, !!c.qui_vc, !!c.qui_cc,
         c.remarques || null, c.suivi || null,
         !!c.newsletter, c.comment_connu || null,
         c.prenom || null, c.nom || null,
@@ -196,7 +196,7 @@ app.get('/stats', async (req, res) => {
       pool.query(`SELECT type, COUNT(*) as n FROM contacts ${where} GROUP BY type`, values),
       pool.query(`SELECT date, type, COUNT(*) as n FROM contacts ${where} GROUP BY date, type ORDER BY date`, values),
       pool.query(`SELECT SUM(motif_declaration::int) AS declaration, SUM(motif_adjonction::int) AS adjonction, SUM(motif_juridique::int) AS juridique, SUM(motif_social::int) AS social, SUM(motif_comptable_fiscal::int) AS comptable_fiscal, SUM(motif_communication::int) AS communication, SUM(motif_adhesion::int) AS adhesion, SUM(motif_activite_artistique::int) AS activite_artistique, SUM(motif_autres::int) AS autres FROM contacts ${where}`, values),
-      pool.query(`SELECT SUM(qui_ck::int) AS ck, SUM(qui_kr::int) AS kr, SUM(qui_lv::int) AS lv FROM contacts ${where}`, values)
+      pool.query(`SELECT SUM(qui_ck::int) AS ck, SUM(qui_kr::int) AS kr, SUM(qui_lv::int) AS lv, SUM(qui_vc::int) AS vc, SUM(qui_cc::int) AS cc FROM contacts ${where}`, values)
     ]);
     res.json({ totals: totals.rows, byType: byType.rows, byDate: byDate.rows, byMotif: byMotif.rows[0], byQui: byQui.rows[0] });
   } catch (err) {
@@ -224,7 +224,7 @@ app.get('/export/csv', async (req, res) => {
       r.motif_social?1:'', r.motif_comptable_fiscal?1:'', r.motif_communication?1:'',
       r.motif_adhesion?1:'', r.motif_activite_artistique?1:'', r.motif_autres?1:'',
       r.mail||'', r.telephone||'',
-      r.qui_ck?1:'', r.qui_kr?1:'', r.qui_lv?1:'',
+      r.qui_ck?1:'', r.qui_kr?1:'', r.qui_lv?1:'', r.qui_vc?1:'', r.qui_cc?1:'',
       (r.remarques||'').replace(/\n/g,' '),
       (r.suivi||'').replace(/\n/g,' '),
       r.newsletter?1:'', r.comment_connu||'', r.created_at
