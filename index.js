@@ -129,6 +129,46 @@ app.delete('/users/:id', auth, adminOnly, async (req, res) => {
   }
 });
 
+/* Route publique checkin tablette - avant le middleware auth */
+app.post('/checkin', async (req, res) => {
+  const c = req.body;
+  if (!c.prenom && !c.nom) return res.status(400).json({ error: 'Prénom ou nom obligatoire' });
+  try {
+    const result = await pool.query(`
+      INSERT INTO contacts (
+        date, type,
+        id_adherent, id_non_adherent, id_structure, id_autres,
+        motif_declaration, motif_adjonction, motif_juridique, motif_social,
+        motif_comptable_fiscal, motif_communication, motif_adhesion,
+        motif_activite_artistique, motif_autres,
+        mail, telephone, prenom, nom, activite_type,
+        remarques
+      ) VALUES (
+        $1, 'PRES',
+        $2, $3, $4, $5,
+        $6, $7, $8, $9, $10, $11, $12, $13, $14,
+        $15, $16, $17, $18, $19,
+        $20
+      ) RETURNING id`,
+      [
+        new Date().toISOString().slice(0, 10),
+        !!c.id_adherent, !!c.id_non_adherent, !!c.id_structure, !!c.id_autres,
+        !!c.motif_declaration, !!c.motif_adjonction, !!c.motif_juridique,
+        !!c.motif_social, !!c.motif_comptable_fiscal, !!c.motif_communication,
+        !!c.motif_adhesion, !!c.motif_activite_artistique, !!c.motif_autres,
+        c.mail || null, c.telephone || null,
+        c.prenom || null, c.nom || null,
+        c.activite_type || null,
+        '[Enregistrement tablette accueil]'
+      ]
+    );
+    res.status(201).json({ ok: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.use(auth);
 
 /* Motifs personnalisés */
@@ -326,46 +366,6 @@ app.get('/export/csv', async (req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename="mda-permanences.csv"');
     res.send('\uFEFF' + [headers.join(','), ...rows].join('\n'));
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* Route publique checkin tablette - pas d'auth requise */
-app.post('/checkin', async (req, res) => {
-  const c = req.body;
-  if (!c.prenom && !c.nom) return res.status(400).json({ error: 'Prénom ou nom obligatoire' });
-  try {
-    const result = await pool.query(`
-      INSERT INTO contacts (
-        date, type,
-        id_adherent, id_non_adherent, id_structure, id_autres,
-        motif_declaration, motif_adjonction, motif_juridique, motif_social,
-        motif_comptable_fiscal, motif_communication, motif_adhesion,
-        motif_activite_artistique, motif_autres,
-        mail, telephone, prenom, nom, activite_type,
-        remarques
-      ) VALUES (
-        $1, 'PRES',
-        $2, $3, $4, $5,
-        $6, $7, $8, $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18, $19,
-        $20
-      ) RETURNING id`,
-      [
-        new Date().toISOString().slice(0, 10),
-        !!c.id_adherent, !!c.id_non_adherent, !!c.id_structure, !!c.id_autres,
-        !!c.motif_declaration, !!c.motif_adjonction, !!c.motif_juridique,
-        !!c.motif_social, !!c.motif_comptable_fiscal, !!c.motif_communication,
-        !!c.motif_adhesion, !!c.motif_activite_artistique, !!c.motif_autres,
-        c.mail || null, c.telephone || null,
-        c.prenom || null, c.nom || null,
-        c.activite_type || null,
-        '[Enregistrement tablette accueil]'
-      ]
-    );
-    res.status(201).json({ ok: true, id: result.rows[0].id });
-  } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
