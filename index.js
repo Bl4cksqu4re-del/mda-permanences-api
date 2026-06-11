@@ -370,5 +370,111 @@ app.get('/export/csv', async (req, res) => {
   }
 });
 
+/* Webex OAuth */
+const WEBEX_CLIENT_ID     = process.env.WEBEX_CLIENT_ID;
+const WEBEX_CLIENT_SECRET = process.env.WEBEX_CLIENT_SECRET;
+const WEBEX_REDIRECT_URI  = process.env.WEBEX_REDIRECT_URI;
+const WEBEX_SCOPES        = 'spark-admin:calling_cdr_read spark-admin:people_read spark:calls_read';
+
+let webexToken = null;
+let webexTokenExpiry = null;
+
+app.get('/webex/auth', (req, res) => {
+  const url = `https://webexapis.com/v1/authorize?client_id=${WEBEX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(WEBEX_REDIRECT_URI)}&scope=${encodeURIComponent(WEBEX_SCOPES)}&state=mda`;
+  res.redirect(url);
+});
+
+app.get('/webex/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).send('Code manquant');
+  try {
+    const response = await fetch('https://webexapis.com/v1/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type:    'authorization_code',
+        client_id:     WEBEX_CLIENT_ID,
+        client_secret: WEBEX_CLIENT_SECRET,
+        redirect_uri:  WEBEX_REDIRECT_URI,
+        code
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || 'Erreur OAuth');
+    webexToken = data.access_token;
+    webexTokenExpiry = Date.now() + (data.expires_in * 1000);
+    res.send(`<html><body style="font-family:sans-serif;padding:40px;text-align:center"><h2>✅ Webex connecté avec succès</h2><p>Vous pouvez fermer cette page.</p></body></html>`);
+  } catch (err) {
+    res.status(500).send(`Erreur: ${err.message}`);
+  }
+});
+
+app.get('/webex/status', auth, (req, res) => {
+  res.json({
+    connected: !!webexToken && Date.now() < (webexTokenExpiry || 0),
+    expires_at: webexTokenExpiry ? new Date(webexTokenExpiry).toISOString() : null
+  });
+});
+
+app.get('/webex/stats', auth, async (req, res) => {
+  if (!webexToken || Date.now() >= (webexTokenExpiry || 0)) {
+    return res.status(401).json({ error: 'Webex non connecté', auth_url: `${process.env.API_URL || 'https://mda-permanences-api.onrender.com'}/webex/auth` });
+  }
+  const { from, to } = req.query;
+  const startDate = from || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const endDate   = to   || new Date().toISOString().slice(0, 10);
+
+  try {
+    const cdrRes = await fetch(
+      `https://webexapis.com/v1/devices/callingData?startTime=${startDate}T00:00:00.000Z&endTime=${endDate}T23:59:59.000Z`,
+      { headers: { 'Authorization': `Bearer ${webexToken}` } }
+    );
+
+    if (!cdrRes.ok) {
+      const err = await cdrRes.json();
+      return res.status(cdrRes.status).json({ error: err.message || 'Erreur Webex API' });
+    }
+
+    const cdrData = await cdrRes.json();
+    const records = cdrData.items || [];
+
+    // Calculs stats
+    const total        = records.length;
+    const decroches    = records.filter(r => r.answerTime || r.answered).length;
+    const nonDecroches = total - decroches;
+    const dureeTotal   = records.reduce((s, r) => s + (r.duration || 0), 0);
+    const dureeMoy     = total > 0 ? Math.round(dureeTotal / total) : 0;
+
+    // Par répondant
+    const parRepondant = {};
+    records.forEach(r => {
+      const nom = r.answeredBy || r.calledLineId || 'Inconnu';
+      if (!parRepondant[nom]) parRepondant[nom] = { appels: 0, duree: 0 };
+      parRepondant[nom].appels++;
+      parRepondant[nom].duree += r.duration || 0;
+    });
+
+    // Par jour
+    const parJour = {};
+    records.forEach(r => {
+      const jour = (r.startTime || '').slice(0, 10);
+      if (!jour) return;
+      if (!parJour[jour]) parJour[jour] = { total: 0, decroches: 0 };
+      parJour[jour].total++;
+      if (r.answerTime || r.answered) parJour[jour].decroches++;
+    });
+
+    res.json({
+      periode: { from: startDate, to: endDate },
+      total, decroches, nonDecroches,
+      dureeTotal, dureeMoy,
+      parRepondant,
+      parJour: Object.entries(parJour).sort(([a],[b]) => a.localeCompare(b)).map(([date, v]) => ({ date, ...v }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`MDA API running on port ${PORT}`));
