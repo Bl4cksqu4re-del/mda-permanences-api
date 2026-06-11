@@ -426,13 +426,16 @@ app.get('/webex/stats', auth, async (req, res) => {
 
   try {
     const cdrRes = await fetch(
-      `https://webexapis.com/v1/devices/callingData?startTime=${startDate}T00:00:00.000Z&endTime=${endDate}T23:59:59.000Z`,
-      { headers: { 'Authorization': `Bearer ${webexToken}` } }
+      `https://webexapis.com/v1/cdr/history?startTime=${startDate}T00:00:00.000Z&endTime=${endDate}T23:59:59.000Z&max=500`,
+      { headers: { 'Authorization': `Bearer ${webexToken}`, 'Accept': 'application/json' } }
     );
 
     if (!cdrRes.ok) {
-      const err = await cdrRes.json();
-      return res.status(cdrRes.status).json({ error: err.message || 'Erreur Webex API' });
+      const rawText = await cdrRes.text();
+      console.error('Webex CDR error:', cdrRes.status, rawText.slice(0, 300));
+      let errMsg = `Erreur Webex ${cdrRes.status}`;
+      try { errMsg = JSON.parse(rawText).message || errMsg; } catch {}
+      return res.status(cdrRes.status).json({ error: errMsg });
     }
 
     const cdrData = await cdrRes.json();
