@@ -400,81 +400,121 @@ app.get('/export/csv', async (req, res) => {
   }
 });
 
-/* Webex OAuth */
-const WEBEX_CLIENT_ID     = process.env.WEBEX_CLIENT_ID;
-const WEBEX_CLIENT_SECRET = process.env.WEBEX_CLIENT_SECRET;
-const WEBEX_REDIRECT_URI  = process.env.WEBEX_REDIRECT_URI;
-const WEBEX_SCOPES        = 'spark-admin:calling_cdr_read spark-admin:people_read spark:calls_read';
+/* Appels téléphoniques - import CSV Orange Business */
+const EQUIPE_MDA = ['VICTORIA CORDA', 'KIM REED', 'CHARLOTTE KENT', 'LOIC VOLAT', 'ANTOINE STORCK'];
 
-let webexToken = null;
-let webexTokenExpiry = null;
+function isTeamMember(name) {
+  if (!name) return false;
+  const upper = name.toUpperCase();
+  return EQUIPE_MDA.some(e => upper.includes(e));
+}
 
-app.get('/webex/status', auth, (req, res) => {
-  res.json({
-    connected: !!webexToken && Date.now() < (webexTokenExpiry || 0),
-    expires_at: webexTokenExpiry ? new Date(webexTokenExpiry).toISOString() : null
-  });
-});
+function parseDuree(dureeStr) {
+  if (!dureeStr) return 0;
+  const parts = dureeStr.split(':').map(Number);
+  if (parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
+  return 0;
+}
 
-app.get('/webex/stats', auth, async (req, res) => {
-  if (!webexToken || Date.now() >= (webexTokenExpiry || 0)) {
-    return res.status(401).json({ error: 'Webex non connecté', auth_url: `${process.env.API_URL || 'https://mda-permanences-api.onrender.com'}/webex/auth` });
-  }
-  const { from, to } = req.query;
-  const startDate = from || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const endDate   = to   || new Date().toISOString().slice(0, 10);
+app.post('/calls/import', auth, async (req, res) => {
+  const { csv } = req.body;
+  if (!csv) return res.status(400).json({ error: 'CSV manquant' });
 
   try {
-    const cdrRes = await fetch(
-      `https://webexapis.com/v1/cdr/history?startTime=${startDate}T00:00:00.000Z&endTime=${endDate}T23:59:59.000Z&max=500`,
-      { headers: { 'Authorization': `Bearer ${webexToken}`, 'Accept': 'application/json' } }
-    );
-
-    if (!cdrRes.ok) {
-      const rawText = await cdrRes.text();
-      console.error('Webex CDR error:', cdrRes.status, rawText.slice(0, 300));
-      let errMsg = `Erreur Webex ${cdrRes.status}`;
-      try { errMsg = JSON.parse(rawText).message || errMsg; } catch {}
-      return res.status(cdrRes.status).json({ error: errMsg });
+    const lines = csv.split('\n').filter(l => l.trim());
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].match(/(".*?"|[^,]+)(?=,|$)/g) || [];
+      const clean = cols.map(c => c.replace(/^"|"$/g, '').trim());
+      if (clean.length < 9) continue;
+      const [numTel, appelant, , interlocuteur, dateStr, heureStr, , , dureeStr] = clean;
+      if (!dateStr || !appelant) continue;
+      const dp = dateStr.split('/');
+      if (dp.length !== 3) continue;
+      const dateISO = `${dp[2]}-${dp[1].padStart(2,'0')}-${dp[0].padStart(2,'0')}`;
+      rows.push({ appelant, dateISO, heureStr, interlocuteur, dureeStr });
     }
 
-    const cdrData = await cdrRes.json();
-    const records = cdrData.items || [];
+    // Grouper par (appelant, date, heure)
+    const groups = new Map();
+    for (const r of rows) {
+      const key = `${r.appelant}|${r.dateISO}|${r.heureStr}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    }
 
-    // Calculs stats
-    const total        = records.length;
-    const decroches    = records.filter(r => r.answerTime || r.answered).length;
-    const nonDecroches = total - decroches;
-    const dureeTotal   = records.reduce((s, r) => s + (r.duration || 0), 0);
-    const dureeMoy     = total > 0 ? Math.round(dureeTotal / total) : 0;
+    let inserted = 0, updated = 0;
+    for (const [key, lines] of groups) {
+      const [appelant, dateISO, heureStr] = key.split('|');
+      let decroche = false, repondant = null, dureeSec = 0;
+      for (const l of lines) {
+        if (isTeamMember(l.interlocuteur) && l.dureeStr) {
+          decroche = true;
+          repondant = l.interlocuteur;
+          dureeSec = parseDuree(l.dureeStr);
+          break;
+        }
+      }
+      const result = await pool.query(`
+        INSERT INTO calls (numero_appelant, date_appel, heure_appel, decroche, repondant, duree_sec)
+        VALUES ($1,$2,$3,$4,$5,$6)
+        ON CONFLICT (numero_appelant, date_appel, heure_appel)
+        DO UPDATE SET decroche=$4, repondant=$5, duree_sec=$6
+        RETURNING (xmax = 0) AS inserted`,
+        [appelant, dateISO, heureStr, decroche, repondant, dureeSec]
+      );
+      if (result.rows[0].inserted) inserted++; else updated++;
+    }
 
-    // Par répondant
-    const parRepondant = {};
-    records.forEach(r => {
-      const nom = r.answeredBy || r.calledLineId || 'Inconnu';
-      if (!parRepondant[nom]) parRepondant[nom] = { appels: 0, duree: 0 };
-      parRepondant[nom].appels++;
-      parRepondant[nom].duree += r.duration || 0;
-    });
+    res.json({ ok: true, total: groups.size, inserted, updated });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    // Par jour
-    const parJour = {};
-    records.forEach(r => {
-      const jour = (r.startTime || '').slice(0, 10);
-      if (!jour) return;
-      if (!parJour[jour]) parJour[jour] = { total: 0, decroches: 0 };
-      parJour[jour].total++;
-      if (r.answerTime || r.answered) parJour[jour].decroches++;
+app.get('/calls/stats', auth, async (req, res) => {
+  const { from, to } = req.query;
+  const conditions = [];
+  const values = [];
+  if (from) { values.push(from); conditions.push(`date_appel >= $${values.length}`); }
+  if (to)   { values.push(to);   conditions.push(`date_appel <= $${values.length}`); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  try {
+    const [totals, parRepondant, parJour, parHeure, bounds] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total, SUM(decroche::int) AS decroches, SUM(duree_sec) AS duree_total, AVG(CASE WHEN decroche THEN duree_sec END) AS duree_moy FROM calls ${where}`, values),
+      pool.query(`SELECT repondant, COUNT(*) AS appels, SUM(duree_sec) AS duree FROM calls ${where} ${where ? 'AND' : 'WHERE'} decroche=TRUE GROUP BY repondant ORDER BY appels DESC`, values),
+      pool.query(`SELECT date_appel, COUNT(*) AS total, SUM(decroche::int) AS decroches, SUM(CASE WHEN decroche THEN duree_sec ELSE 0 END) AS duree FROM calls ${where} GROUP BY date_appel ORDER BY date_appel DESC`, values),
+      pool.query(`SELECT heure_appel, COUNT(*) AS total FROM calls ${where} GROUP BY heure_appel`, values),
+      pool.query(`SELECT MIN(date_appel) AS min_date, MAX(date_appel) AS max_date, MAX(imported_at) AS last_import FROM calls`)
+    ]);
+
+    const t = totals.rows[0];
+    const total = parseInt(t.total) || 0;
+    const decroches = parseInt(t.decroches) || 0;
+
+    // Regrouper par heure (0-23)
+    const heuresMap = {};
+    parHeure.rows.forEach(r => {
+      const h = (r.heure_appel || '').slice(0,2);
+      if (!h) return;
+      heuresMap[h] = (heuresMap[h] || 0) + parseInt(r.total);
     });
 
     res.json({
-      periode: { from: startDate, to: endDate },
-      total, decroches, nonDecroches,
-      dureeTotal, dureeMoy,
-      parRepondant,
-      parJour: Object.entries(parJour).sort(([a],[b]) => a.localeCompare(b)).map(([date, v]) => ({ date, ...v }))
+      periode: { from: from || bounds.rows[0].min_date, to: to || bounds.rows[0].max_date },
+      total, decroches, nonDecroches: total - decroches,
+      dureeTotal: parseInt(t.duree_total) || 0,
+      dureeMoy: Math.round(parseFloat(t.duree_moy)) || 0,
+      parRepondant: parRepondant.rows.map(r => ({ nom: r.repondant, appels: parseInt(r.appels), duree: parseInt(r.duree) })),
+      parJour: parJour.rows.map(r => ({ date: r.date_appel.toISOString().slice(0,10), total: parseInt(r.total), decroches: parseInt(r.decroches), duree: parseInt(r.duree) })),
+      parHeure: Object.entries(heuresMap).sort(([a],[b]) => a.localeCompare(b)).map(([h,v]) => ({ heure: h, total: v })),
+      lastImport: bounds.rows[0].last_import,
+      dataRange: { min: bounds.rows[0].min_date, max: bounds.rows[0].max_date }
     });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
