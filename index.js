@@ -4,6 +4,7 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const ExcelJS = require('exceljs');
 
 const app = express();
 app.use(cors({
@@ -26,7 +27,7 @@ function hashPassword(pwd) {
 }
 
 function auth(req, res, next) {
-  const token = req.headers['authorization'];
+  const token = req.headers['authorization'] || req.query.token;
   if (!token) return res.status(401).json({ error: 'Non autorisé' });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
@@ -763,6 +764,117 @@ app.put('/timesheet/users/:id/contrat', auth, adminOnly, async (req, res) => {
     await pool.query(`UPDATE users SET heures_contrat_mois=$1 WHERE id=$2`, [heures_contrat_mois, req.params.id]);
     res.json({ ok: true });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const MOTIF_LABELS_TS = {
+  CP: 'Congé payé', RTT: 'RTT / Récupération', MALADIE: 'Maladie',
+  FERIE: 'Jour férié', MEDICAL: 'Médical', AUTRE: 'Autre'
+};
+
+app.get('/timesheet/export', auth, async (req, res) => {
+  const { mois, user_id } = req.query;
+  if (!mois) return res.status(400).json({ error: 'Mois requis' });
+
+  let targetUserId = req.user.id;
+  if (user_id && parseInt(user_id) !== req.user.id) {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Accès réservé' });
+    targetUserId = parseInt(user_id);
+  }
+
+  try {
+    const [entriesRes, userRes] = await Promise.all([
+      pool.query(`SELECT * FROM timesheet_entries WHERE user_id=$1 AND date >= $2::date AND date < ($2::date + INTERVAL '1 month') ORDER BY date`, [targetUserId, `${mois}-01`]),
+      pool.query(`SELECT display_name, initiales, heures_contrat_mois FROM users WHERE id=$1`, [targetUserId])
+    ]);
+    const user = userRes.rows[0];
+    const entriesMap = {};
+    entriesRes.rows.forEach(e => { entriesMap[e.date.toISOString().slice(0,10)] = e; });
+
+    const [year, month] = mois.split('-').map(Number);
+    const lastDay = new Date(year, month, 0).getDate();
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Feuille de temps');
+
+    sheet.columns = [
+      { width: 4 }, { width: 22 }, { width: 12 }, { width: 12 }, { width: 12 },
+      { width: 14 }, { width: 14 }, { width: 14 }, { width: 24 }
+    ];
+
+    sheet.mergeCells('B1:H1');
+    sheet.getCell('B1').value = 'FEUILLE DE TEMPS MENSUEL';
+    sheet.getCell('B1').font = { bold: true, size: 14 };
+    sheet.getCell('B1').alignment = { horizontal: 'center' };
+
+    sheet.getCell('B3').value = 'Période';
+    sheet.getCell('C3').value = new Date(year, month-1, 1).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+    sheet.getCell('B4').value = "Nom de l'employé";
+    sheet.getCell('C4').value = user.display_name;
+    sheet.getCell('F4').value = 'HEURES CONTRAT/MOIS';
+    sheet.getCell('H4').value = parseFloat(user.heures_contrat_mois);
+    [3,4].forEach(r => { sheet.getCell(`B${r}`).font = { bold: true }; sheet.getCell(`F${r}`).font = { bold: true }; });
+
+    const headerRow = 6;
+    const headers = ['Date', 'Jour', 'Début', 'Fin', 'Pause', 'H. régulières', 'H. sup', 'H. totales', 'Motif / Précision'];
+    headers.forEach((h, i) => {
+      const cell = sheet.getCell(headerRow, i+1);
+      cell.value = h;
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1C1F2C' } };
+      cell.alignment = { horizontal: 'center' };
+    });
+
+    let totalReg = 0, totalSup = 0;
+    for (let d = 1; d <= lastDay; d++) {
+      const dateStr = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const date = new Date(year, month-1, d);
+      const e = entriesMap[dateStr];
+      const row = headerRow + d;
+
+      sheet.getCell(row, 1).value = date.toLocaleDateString('fr-FR');
+      sheet.getCell(row, 2).value = date.toLocaleDateString('fr-FR', { weekday: 'long' });
+
+      if (e) {
+        sheet.getCell(row, 3).value = e.heure_debut ? e.heure_debut.slice(0,5) : '';
+        sheet.getCell(row, 4).value = e.heure_fin ? e.heure_fin.slice(0,5) : '';
+        sheet.getCell(row, 5).value = e.pause_minutes ? `${e.pause_minutes} min` : '';
+        sheet.getCell(row, 6).value = parseFloat(e.heures_reg) || '';
+        sheet.getCell(row, 7).value = parseFloat(e.heures_sup) || '';
+        sheet.getCell(row, 8).value = parseFloat(e.heures_total) || '';
+        const motifLabel = e.motif ? (MOTIF_LABELS_TS[e.motif] || e.motif) : '';
+        sheet.getCell(row, 9).value = [motifLabel, e.precision].filter(Boolean).join(' — ');
+        totalReg += parseFloat(e.heures_reg) || 0;
+        totalSup += parseFloat(e.heures_sup) || 0;
+      }
+
+      if (date.getDay() === 0 || date.getDay() === 6) {
+        for (let c = 1; c <= 9; c++) sheet.getCell(row, c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5F5FA' } };
+      }
+    }
+
+    const totalRow = headerRow + lastDay + 2;
+    sheet.getCell(totalRow, 5).value = 'TOTAL';
+    sheet.getCell(totalRow, 5).font = { bold: true };
+    sheet.getCell(totalRow, 6).value = Math.round(totalReg*100)/100;
+    sheet.getCell(totalRow, 6).font = { bold: true };
+    sheet.getCell(totalRow, 7).value = Math.round(totalSup*100)/100;
+    sheet.getCell(totalRow, 7).font = { bold: true };
+    sheet.getCell(totalRow, 8).value = Math.round((totalReg+totalSup)*100)/100;
+    sheet.getCell(totalRow, 8).font = { bold: true };
+
+    sheet.getCell(totalRow+1, 5).value = 'Contrat';
+    sheet.getCell(totalRow+1, 6).value = parseFloat(user.heures_contrat_mois);
+    sheet.getCell(totalRow+2, 5).value = 'Écart';
+    sheet.getCell(totalRow+2, 6).value = Math.round((totalReg - parseFloat(user.heures_contrat_mois))*100)/100;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="feuille_temps_${user.initiales}_${mois}.xlsx"`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
