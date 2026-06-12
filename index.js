@@ -531,5 +531,242 @@ app.get('/calls/stats', auth, async (req, res) => {
   }
 });
 
+/* Feuille de temps */
+
+// Jours fériés français (fixes + mobiles calculés)
+function getJoursFeries(year) {
+  // Calcul de Pâques (algorithme de Gauss)
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19*a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2*e + 2*i - h - k) % 7;
+  const m = Math.floor((a + 11*h + 22*l) / 451);
+  const month = Math.floor((h + l - 7*m + 114) / 31);
+  const day = ((h + l - 7*m + 114) % 31) + 1;
+  const paques = new Date(year, month - 1, day);
+
+  const addDays = (date, days) => { const d2 = new Date(date); d2.setDate(d2.getDate() + days); return d2; };
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
+  return new Set([
+    `${year}-01-01`, // Jour de l'an
+    fmt(addDays(paques, 1)),  // Lundi de Pâques
+    `${year}-05-01`, // Fête du travail
+    `${year}-05-08`, // Victoire 1945
+    fmt(addDays(paques, 39)), // Ascension
+    fmt(addDays(paques, 50)), // Lundi de Pentecôte
+    `${year}-07-14`, // Fête nationale
+    `${year}-08-15`, // Assomption
+    `${year}-11-01`, // Toussaint
+    `${year}-11-11`, // Armistice
+    `${year}-12-25`, // Noël
+  ]);
+}
+
+app.get('/timesheet/holidays', auth, (req, res) => {
+  const year = parseInt(req.query.year) || new Date().getFullYear();
+  res.json([...getJoursFeries(year), ...getJoursFeries(year-1), ...getJoursFeries(year+1)]);
+});
+
+// Récupérer les entrées d'un mois pour l'utilisateur connecté (ou un autre si admin)
+app.get('/timesheet/entries', auth, async (req, res) => {
+  const { mois, user_id } = req.query; // mois = YYYY-MM
+  if (!mois) return res.status(400).json({ error: 'Mois requis (format YYYY-MM)' });
+  let targetUserId = req.user.id;
+  if (user_id && parseInt(user_id) !== req.user.id) {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Accès réservé à l\'administrateur' });
+    targetUserId = parseInt(user_id);
+  }
+  try {
+    const [entries, lock, user] = await Promise.all([
+      pool.query(`SELECT * FROM timesheet_entries WHERE user_id=$1 AND date >= $2::date AND date < ($2::date + INTERVAL '1 month') ORDER BY date`, [targetUserId, `${mois}-01`]),
+      pool.query(`SELECT locked FROM timesheet_locks WHERE user_id=$1 AND mois=$2`, [targetUserId, mois]),
+      pool.query(`SELECT id, display_name, initiales, heures_contrat_mois FROM users WHERE id=$1`, [targetUserId])
+    ]);
+    res.json({
+      entries: entries.rows,
+      locked: lock.rows.length > 0 ? lock.rows[0].locked : false,
+      user: user.rows[0]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Enregistrer/mettre à jour une entrée
+app.post('/timesheet/entries', auth, async (req, res) => {
+  const { date, heure_debut, heure_fin, pause_minutes, motif, precision, user_id } = req.body;
+  if (!date) return res.status(400).json({ error: 'Date requise' });
+
+  let targetUserId = req.user.id;
+  if (user_id && parseInt(user_id) !== req.user.id) {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Accès réservé à l\'administrateur' });
+    targetUserId = parseInt(user_id);
+  }
+
+  const mois = date.slice(0, 7);
+  try {
+    // Vérifier verrouillage (sauf admin)
+    if (!req.user.is_admin) {
+      const lock = await pool.query(`SELECT locked FROM timesheet_locks WHERE user_id=$1 AND mois=$2`, [targetUserId, mois]);
+      if (lock.rows.length > 0 && lock.rows[0].locked) {
+        return res.status(403).json({ error: 'Ce mois est verrouillé. Contactez votre administrateur pour le modifier.' });
+      }
+    }
+
+    // Calcul des heures
+    let heuresReg = 0, heuresSup = 0, heuresTotal = 0;
+    if (heure_debut && heure_fin && !motif) {
+      const [hd, md] = heure_debut.split(':').map(Number);
+      const [hf, mf] = heure_fin.split(':').map(Number);
+      let totalMin = (hf*60 + mf) - (hd*60 + md) - (pause_minutes || 0);
+      if (totalMin < 0) totalMin += 24*60;
+      heuresTotal = Math.round((totalMin / 60) * 100) / 100;
+      // Heures sup si > 7h (config simplifiée, contrat journalier théorique 7h)
+      const seuilJour = 7;
+      if (heuresTotal > seuilJour) {
+        heuresReg = seuilJour;
+        heuresSup = Math.round((heuresTotal - seuilJour) * 100) / 100;
+      } else {
+        heuresReg = heuresTotal;
+        heuresSup = 0;
+      }
+    }
+
+    const result = await pool.query(`
+      INSERT INTO timesheet_entries (user_id, date, heure_debut, heure_fin, pause_minutes, motif, precision, heures_reg, heures_sup, heures_total, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+      ON CONFLICT (user_id, date)
+      DO UPDATE SET heure_debut=$3, heure_fin=$4, pause_minutes=$5, motif=$6, precision=$7, heures_reg=$8, heures_sup=$9, heures_total=$10, updated_at=NOW()
+      RETURNING *`,
+      [targetUserId, date, heure_debut || null, heure_fin || null, pause_minutes || 0, motif || null, precision || null, heuresReg, heuresSup, heuresTotal]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/timesheet/entries/:date', auth, async (req, res) => {
+  const { user_id } = req.query;
+  let targetUserId = req.user.id;
+  if (user_id && parseInt(user_id) !== req.user.id) {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Accès réservé à l\'administrateur' });
+    targetUserId = parseInt(user_id);
+  }
+  try {
+    await pool.query(`DELETE FROM timesheet_entries WHERE user_id=$1 AND date=$2`, [targetUserId, req.params.date]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Verrouiller / déverrouiller un mois
+app.post('/timesheet/lock', auth, async (req, res) => {
+  const { mois, locked, user_id } = req.body;
+  if (!mois) return res.status(400).json({ error: 'Mois requis' });
+
+  let targetUserId = req.user.id;
+  if (user_id && parseInt(user_id) !== req.user.id) {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Accès réservé à l\'administrateur' });
+    targetUserId = parseInt(user_id);
+  }
+  // Si on veut déverrouiller, seul l'admin peut
+  if (locked === false && !req.user.is_admin) {
+    return res.status(403).json({ error: 'Seul l\'administrateur peut déverrouiller un mois' });
+  }
+  try {
+    await pool.query(`
+      INSERT INTO timesheet_locks (user_id, mois, locked, locked_at)
+      VALUES ($1,$2,$3,NOW())
+      ON CONFLICT (user_id, mois) DO UPDATE SET locked=$3, locked_at=NOW()`,
+      [targetUserId, mois, !!locked]
+    );
+    res.json({ ok: true, locked: !!locked });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Vue admin : liste de tous les salariés avec résumé du mois
+app.get('/timesheet/admin/summary', auth, adminOnly, async (req, res) => {
+  const { mois } = req.query;
+  if (!mois) return res.status(400).json({ error: 'Mois requis' });
+  try {
+    const users = await pool.query(`SELECT id, display_name, initiales, heures_contrat_mois FROM users ORDER BY display_name`);
+    const results = [];
+    for (const u of users.rows) {
+      const [entries, lock] = await Promise.all([
+        pool.query(`SELECT * FROM timesheet_entries WHERE user_id=$1 AND date >= $2::date AND date < ($2::date + INTERVAL '1 month')`, [u.id, `${mois}-01`]),
+        pool.query(`SELECT locked FROM timesheet_locks WHERE user_id=$1 AND mois=$2`, [u.id, mois])
+      ]);
+      const totalReg = entries.rows.reduce((s,e) => s + parseFloat(e.heures_reg||0), 0);
+      const totalSup = entries.rows.reduce((s,e) => s + parseFloat(e.heures_sup||0), 0);
+      const totalSaisi = entries.rows.length;
+      const motifsCount = {};
+      entries.rows.forEach(e => { if (e.motif) motifsCount[e.motif] = (motifsCount[e.motif]||0) + 1; });
+      results.push({
+        user_id: u.id, display_name: u.display_name, initiales: u.initiales,
+        heures_contrat_mois: parseFloat(u.heures_contrat_mois),
+        total_reg: Math.round(totalReg*100)/100, total_sup: Math.round(totalSup*100)/100,
+        jours_saisis: totalSaisi, locked: lock.rows.length > 0 ? lock.rows[0].locked : false,
+        motifs: motifsCount
+      });
+    }
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Récap annuel par utilisateur
+app.get('/timesheet/annual', auth, async (req, res) => {
+  const { year, user_id } = req.query;
+  if (!year) return res.status(400).json({ error: 'Année requise' });
+  let targetUserId = req.user.id;
+  if (user_id && parseInt(user_id) !== req.user.id) {
+    if (!req.user.is_admin) return res.status(403).json({ error: 'Accès réservé à l\'administrateur' });
+    targetUserId = parseInt(user_id);
+  }
+  try {
+    const entries = await pool.query(
+      `SELECT * FROM timesheet_entries WHERE user_id=$1 AND date >= $2::date AND date < $3::date ORDER BY date`,
+      [targetUserId, `${year}-01-01`, `${parseInt(year)+1}-01-01`]
+    );
+    const motifsCount = {};
+    let totalReg = 0, totalSup = 0;
+    entries.rows.forEach(e => {
+      if (e.motif) motifsCount[e.motif] = (motifsCount[e.motif]||0) + 1;
+      totalReg += parseFloat(e.heures_reg||0);
+      totalSup += parseFloat(e.heures_sup||0);
+    });
+    res.json({
+      year: parseInt(year),
+      total_reg: Math.round(totalReg*100)/100,
+      total_sup: Math.round(totalSup*100)/100,
+      jours_saisis: entries.rows.length,
+      motifs: motifsCount
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mettre à jour les heures de contrat d'un utilisateur (admin)
+app.put('/timesheet/users/:id/contrat', auth, adminOnly, async (req, res) => {
+  const { heures_contrat_mois } = req.body;
+  if (!heures_contrat_mois) return res.status(400).json({ error: 'Valeur requise' });
+  try {
+    await pool.query(`UPDATE users SET heures_contrat_mois=$1 WHERE id=$2`, [heures_contrat_mois, req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`MDA API running on port ${PORT}`));
