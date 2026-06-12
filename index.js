@@ -12,7 +12,7 @@ app.use(cors({
   credentials: true
 }));
 app.options('*', cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -443,27 +443,39 @@ app.post('/calls/import', auth, async (req, res) => {
       groups.get(key).push(r);
     }
 
+    const entries = [...groups.entries()];
     let inserted = 0, updated = 0;
-    for (const [key, lines] of groups) {
-      const [appelant, dateISO, heureStr] = key.split('|');
-      let decroche = false, repondant = null, dureeSec = 0;
-      for (const l of lines) {
-        if (isTeamMember(l.interlocuteur) && l.dureeStr) {
-          decroche = true;
-          repondant = l.interlocuteur;
-          dureeSec = parseDuree(l.dureeStr);
-          break;
+    const BATCH = 200;
+
+    for (let i = 0; i < entries.length; i += BATCH) {
+      const batch = entries.slice(i, i + BATCH);
+      const values = [];
+      const placeholders = [];
+      batch.forEach(([key, lines], idx) => {
+        const [appelant, dateISO, heureStr] = key.split('|');
+        let decroche = false, repondant = null, dureeSec = 0;
+        for (const l of lines) {
+          if (isTeamMember(l.interlocuteur) && l.dureeStr) {
+            decroche = true;
+            repondant = l.interlocuteur;
+            dureeSec = parseDuree(l.dureeStr);
+            break;
+          }
         }
-      }
+        const base = idx * 6;
+        placeholders.push(`($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6})`);
+        values.push(appelant, dateISO, heureStr, decroche, repondant, dureeSec);
+      });
+
       const result = await pool.query(`
         INSERT INTO calls (numero_appelant, date_appel, heure_appel, decroche, repondant, duree_sec)
-        VALUES ($1,$2,$3,$4,$5,$6)
+        VALUES ${placeholders.join(',')}
         ON CONFLICT (numero_appelant, date_appel, heure_appel)
-        DO UPDATE SET decroche=$4, repondant=$5, duree_sec=$6
+        DO UPDATE SET decroche=EXCLUDED.decroche, repondant=EXCLUDED.repondant, duree_sec=EXCLUDED.duree_sec
         RETURNING (xmax = 0) AS inserted`,
-        [appelant, dateISO, heureStr, decroche, repondant, dureeSec]
+        values
       );
-      if (result.rows[0].inserted) inserted++; else updated++;
+      result.rows.forEach(r => { if (r.inserted) inserted++; else updated++; });
     }
 
     res.json({ ok: true, total: groups.size, inserted, updated });
