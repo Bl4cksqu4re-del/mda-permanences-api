@@ -342,6 +342,15 @@ app.delete('/contacts/:id', async (req, res) => {
   }
 });
 
+app.put('/contacts/:id/pris-en-charge', async (req, res) => {
+  try {
+    const result = await pool.query('UPDATE contacts SET pris_en_charge=TRUE WHERE id=$1 RETURNING *', [req.params.id]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/stats', async (req, res) => {
   const { from, to } = req.query;
   const conditions = [];
