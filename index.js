@@ -812,7 +812,18 @@ app.get('/timesheet/entries', auth, async (req, res) => {
     const [entries, lock, user] = await Promise.all([
       pool.query(`SELECT * FROM timesheet_entries WHERE user_id=$1 AND date >= $2::date AND date < ($2::date + INTERVAL '1 month') ORDER BY date`, [targetUserId, `${mois}-01`]),
       pool.query(`SELECT locked FROM timesheet_locks WHERE user_id=$1 AND mois=$2`, [targetUserId, mois]),
-      pool.query(`SELECT id, display_name, initiales, heures_contrat_mois, heures_semaine_base, jours_semaine_base FROM users WHERE id=$1`, [targetUserId])
+      pool.query(`
+  SELECT
+    id,
+    display_name,
+    initiales,
+    heures_contrat_mois,
+    heures_semaine_base,
+    jours_semaine_base,
+    planning_base
+  FROM users
+  WHERE id=$1
+`, [targetUserId])
     ]);
     res.json({
       entries: entries.rows,
@@ -853,23 +864,49 @@ app.post('/timesheet/entries', auth, async (req, res) => {
     const seuilJour = Math.round((heuresSemaineBase / joursSemaineBase) * 100) / 100;
 
     // Calcul des heures
-    let heuresReg = 0, heuresSup = 0, heuresTotal = 0;
-    if (heure_debut && heure_fin && !motif) {
-      const [hd, md] = heure_debut.split(':').map(Number);
-      const [hf, mf] = heure_fin.split(':').map(Number);
-      let totalMin = (hf*60 + mf) - (hd*60 + md) - (pause_minutes || 0);
-      if (totalMin < 0) totalMin += 24*60;
-      heuresTotal = Math.round((totalMin / 60) * 100) / 100;
-      // Heures sup au-delà du seuil quotidien propre au salarié
-      if (heuresTotal > seuilJour) {
-        heuresReg = seuilJour;
-        heuresSup = Math.round((heuresTotal - seuilJour) * 100) / 100;
-      } else {
-        heuresReg = heuresTotal;
-        heuresSup = 0;
-      }
-    }
+   // Calcul des heures
+let heuresReg = 0;
+let heuresSup = 0;
+let heuresTotal = 0;
 
+// Congés / RTT / fériés comptabilisés automatiquement
+if (motif) {
+  const motifsComptabilises = [
+    'CP',
+    'RTT',
+    'FERIE',
+    'MALADIE'
+  ];
+
+  if (motifsComptabilises.includes(motif)) {
+    heuresReg = seuilJour;
+    heuresSup = 0;
+    heuresTotal = seuilJour;
+  }
+}
+else if (heure_debut && heure_fin) {
+  const [hd, md] = heure_debut.split(':').map(Number);
+  const [hf, mf] = heure_fin.split(':').map(Number);
+
+  let totalMin =
+    (hf * 60 + mf) -
+    (hd * 60 + md) -
+    (pause_minutes || 0);
+
+  if (totalMin < 0) totalMin += 24 * 60;
+
+  heuresTotal =
+    Math.round((totalMin / 60) * 100) / 100;
+
+  if (heuresTotal > seuilJour) {
+    heuresReg = seuilJour;
+    heuresSup =
+      Math.round((heuresTotal - seuilJour) * 100) / 100;
+  } else {
+    heuresReg = heuresTotal;
+    heuresSup = 0;
+  }
+}
     const result = await pool.query(`
       INSERT INTO timesheet_entries (user_id, date, heure_debut, heure_fin, pause_minutes, motif, precision, heures_reg, heures_sup, heures_total, updated_at)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
@@ -933,7 +970,7 @@ app.get('/timesheet/admin/summary', auth, adminOnly, async (req, res) => {
   const { mois } = req.query;
   if (!mois) return res.status(400).json({ error: 'Mois requis' });
   try {
-    const users = await pool.query(`SELECT id, display_name, initiales, heures_contrat_mois, heures_semaine_base, jours_semaine_base FROM users ORDER BY display_name`);
+    const users = await pool.query(`SELECT id, display_name, initiales, heures_contrat_mois, heures_semaine_base, jours_semaine_base, planning_base FROM users ORDER BY display_name`);
     const results = [];
     for (const u of users.rows) {
       const [entries, lock] = await Promise.all([
@@ -1008,19 +1045,61 @@ app.get('/timesheet/annual', auth, async (req, res) => {
 
 // Mettre à jour l'horaire de base d'un utilisateur (admin) : heures/semaine, jours/semaine, contrat mensuel
 app.put('/timesheet/users/:id/contrat', auth, adminOnly, async (req, res) => {
-  const { heures_contrat_mois, heures_semaine_base, jours_semaine_base } = req.body;
-  if (heures_contrat_mois == null && heures_semaine_base == null && jours_semaine_base == null) {
+  const {
+    heures_contrat_mois,
+    heures_semaine_base,
+    jours_semaine_base,
+    planning_base
+  } = req.body;
+
+  if (
+    heures_contrat_mois == null &&
+    heures_semaine_base == null &&
+    jours_semaine_base == null &&
+    planning_base == null
+  ) {
     return res.status(400).json({ error: 'Valeur requise' });
   }
+
   const sets = [];
   const values = [];
-  if (heures_contrat_mois != null) { values.push(heures_contrat_mois); sets.push(`heures_contrat_mois=$${values.length}`); }
-  if (heures_semaine_base != null) { values.push(heures_semaine_base); sets.push(`heures_semaine_base=$${values.length}`); }
-  if (jours_semaine_base != null) { values.push(jours_semaine_base); sets.push(`jours_semaine_base=$${values.length}`); }
+
+  if (heures_contrat_mois != null) {
+    values.push(heures_contrat_mois);
+    sets.push(`heures_contrat_mois=$${values.length}`);
+  }
+
+  if (heures_semaine_base != null) {
+    values.push(heures_semaine_base);
+    sets.push(`heures_semaine_base=$${values.length}`);
+  }
+
+  if (jours_semaine_base != null) {
+    values.push(jours_semaine_base);
+    sets.push(`jours_semaine_base=$${values.length}`);
+  }
+
+  if (planning_base != null) {
+    values.push(JSON.stringify(planning_base));
+    sets.push(`planning_base=$${values.length}`);
+  }
+
   values.push(req.params.id);
+
   try {
     await pool.query(`UPDATE users SET ${sets.join(', ')} WHERE id=$${values.length}`, values);
-    const result = await pool.query(`SELECT id, display_name, initiales, heures_contrat_mois, heures_semaine_base, jours_semaine_base FROM users WHERE id=$1`, [req.params.id]);
+    const result = await pool.query(`
+  SELECT
+    id,
+    display_name,
+    initiales,
+    heures_contrat_mois,
+    heures_semaine_base,
+    jours_semaine_base,
+    planning_base
+  FROM users
+  WHERE id=$1
+`, [req.params.id]);
     res.json({ ok: true, user: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
