@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const ExcelJS = require('exceljs');
-const webexRoutes = require('./routes/webex');
+const webexRoutes = require('./route/webex');
 
 const app = express();
 app.use(cors({
