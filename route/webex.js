@@ -7,11 +7,17 @@ console.log('WEBEX ROUTES LOADED');
 /*
  * TEST
  */
-router.get('/webex/test', (req, res) => {
-  res.json({
-    ok: true,
-    message: 'Stat Webex'
-  });
+router.get('/webex/stats', async (req, res) => {
+  try {
+    res.json({
+      ok: true,
+      source: 'webex_group_stats'
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err.message
+    });
+  }
 });
 
 /*
