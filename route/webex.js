@@ -83,14 +83,21 @@ router.post('/webex/import/group', async (req, res) => {
       });
     }
 
-    const lines = csv
-      .split('\n')
-      .filter(l => l.trim());
+   const lines = csv
+  .split('\n')
+  .filter(l => l.trim());
 
-    res.json({
-      ok: true,
-      lignes: lines.length
-    });
+const preview = [];
+
+for (let i = 1; i < Math.min(lines.length, 6); i++) {
+  preview.push(parseCsvLine(lines[i]));
+}
+
+res.json({
+  ok: true,
+  lignes: lines.length,
+  preview
+});
 
   } catch (err) {
     res.status(500).json({
