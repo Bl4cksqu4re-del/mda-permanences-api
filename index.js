@@ -142,14 +142,14 @@ app.post('/checkin', async (req, res) => {
         motif_declaration, motif_adjonction, motif_juridique, motif_social,
         motif_comptable_fiscal, motif_communication, motif_adhesion,
         motif_activite_artistique, motif_autres,
-        mail, telephone, prenom, nom, activite_type,
+        mail, telephone, prenom, nom, activite_type, numero_adherent,
         remarques
       ) VALUES (
         $1, 'PRES',
         $2, $3, $4, $5,
         $6, $7, $8, $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18, $19,
-        $20
+        $15, $16, $17, $18, $19, $20,
+        $21
       ) RETURNING id`,
       [
         new Date().toISOString().slice(0, 10),
@@ -159,7 +159,7 @@ app.post('/checkin', async (req, res) => {
         !!c.motif_adhesion, !!c.motif_activite_artistique, !!c.motif_autres,
         c.mail || null, c.telephone || null,
         c.prenom || null, c.nom || null,
-        c.activite_type || null,
+        c.activite_type || null, c.numero_adherent || null,
         '[Enregistrement tablette accueil]'
       ]
     );
@@ -268,10 +268,10 @@ app.post('/contacts', async (req, res) => {
         motif_activite_artistique, motif_autres,
         mail, telephone, qui_ck, qui_kr, qui_lv, qui_vc, qui_cc,
         remarques, suivi, newsletter, comment_connu,
-        prenom, nom, motifs_custom, a_rappeler
+        prenom, nom, motifs_custom, a_rappeler, numero_adherent
       ) VALUES (
         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
+        $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
       ) RETURNING *`,
       [
         c.date, c.type,
@@ -286,7 +286,7 @@ app.post('/contacts', async (req, res) => {
         !!c.newsletter, c.comment_connu || null,
         c.prenom || null, c.nom || null,
         c.motifs_custom && c.motifs_custom.length ? c.motifs_custom : null,
-        !!c.a_rappeler
+        !!c.a_rappeler, c.numero_adherent || null
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -308,8 +308,8 @@ app.put('/contacts/:id', async (req, res) => {
         motif_adhesion=$14, motif_activite_artistique=$15, motif_autres=$16,
         mail=$17, telephone=$18, qui_ck=$19, qui_kr=$20, qui_lv=$21, qui_vc=$22, qui_cc=$23,
         remarques=$24, suivi=$25, newsletter=$26, comment_connu=$27,
-        prenom=$28, nom=$29, motifs_custom=$30, a_rappeler=$31
-      WHERE id=$32 RETURNING *`,
+        prenom=$28, nom=$29, motifs_custom=$30, a_rappeler=$31, numero_adherent=$32
+      WHERE id=$33 RETURNING *`,
       [
         c.date, c.type,
         !!c.id_adherent, !!c.id_non_adherent, !!c.id_ancien_adherent,
@@ -323,7 +323,7 @@ app.put('/contacts/:id', async (req, res) => {
         !!c.newsletter, c.comment_connu || null,
         c.prenom || null, c.nom || null,
         c.motifs_custom && c.motifs_custom.length ? c.motifs_custom : null,
-        !!c.a_rappeler,
+        !!c.a_rappeler, c.numero_adherent || null,
         req.params.id
       ]
     );
@@ -592,7 +592,7 @@ app.get('/timesheet/entries', auth, async (req, res) => {
     const [entries, lock, user] = await Promise.all([
       pool.query(`SELECT * FROM timesheet_entries WHERE user_id=$1 AND date >= $2::date AND date < ($2::date + INTERVAL '1 month') ORDER BY date`, [targetUserId, `${mois}-01`]),
       pool.query(`SELECT locked FROM timesheet_locks WHERE user_id=$1 AND mois=$2`, [targetUserId, mois]),
-      pool.query(`SELECT id, display_name, initiales, heures_contrat_mois FROM users WHERE id=$1`, [targetUserId])
+      pool.query(`SELECT id, display_name, initiales, heures_contrat_mois, heures_semaine_base, jours_semaine_base FROM users WHERE id=$1`, [targetUserId])
     ]);
     res.json({
       entries: entries.rows,
@@ -625,6 +625,13 @@ app.post('/timesheet/entries', auth, async (req, res) => {
       }
     }
 
+    // Seuil quotidien = horaire de base du salarié (heures/semaine ÷ jours/semaine), 35h/5j = 7h par défaut
+    const baseRes = await pool.query(`SELECT heures_semaine_base, jours_semaine_base FROM users WHERE id=$1`, [targetUserId]);
+    const base = baseRes.rows[0] || {};
+    const heuresSemaineBase = parseFloat(base.heures_semaine_base) || 35;
+    const joursSemaineBase = parseFloat(base.jours_semaine_base) || 5;
+    const seuilJour = Math.round((heuresSemaineBase / joursSemaineBase) * 100) / 100;
+
     // Calcul des heures
     let heuresReg = 0, heuresSup = 0, heuresTotal = 0;
     if (heure_debut && heure_fin && !motif) {
@@ -633,8 +640,7 @@ app.post('/timesheet/entries', auth, async (req, res) => {
       let totalMin = (hf*60 + mf) - (hd*60 + md) - (pause_minutes || 0);
       if (totalMin < 0) totalMin += 24*60;
       heuresTotal = Math.round((totalMin / 60) * 100) / 100;
-      // Heures sup si > 7h (config simplifiée, contrat journalier théorique 7h)
-      const seuilJour = 7;
+      // Heures sup au-delà du seuil quotidien propre au salarié
       if (heuresTotal > seuilJour) {
         heuresReg = seuilJour;
         heuresSup = Math.round((heuresTotal - seuilJour) * 100) / 100;
@@ -706,7 +712,7 @@ app.get('/timesheet/admin/summary', auth, adminOnly, async (req, res) => {
   const { mois } = req.query;
   if (!mois) return res.status(400).json({ error: 'Mois requis' });
   try {
-    const users = await pool.query(`SELECT id, display_name, initiales, heures_contrat_mois FROM users ORDER BY display_name`);
+    const users = await pool.query(`SELECT id, display_name, initiales, heures_contrat_mois, heures_semaine_base, jours_semaine_base FROM users ORDER BY display_name`);
     const results = [];
     for (const u of users.rows) {
       const [entries, lock] = await Promise.all([
@@ -721,6 +727,8 @@ app.get('/timesheet/admin/summary', auth, adminOnly, async (req, res) => {
       results.push({
         user_id: u.id, display_name: u.display_name, initiales: u.initiales,
         heures_contrat_mois: parseFloat(u.heures_contrat_mois),
+        heures_semaine_base: parseFloat(u.heures_semaine_base) || 35,
+        jours_semaine_base: parseFloat(u.jours_semaine_base) || 5,
         total_reg: Math.round(totalReg*100)/100, total_sup: Math.round(totalSup*100)/100,
         jours_saisis: totalSaisi, locked: lock.rows.length > 0 ? lock.rows[0].locked : false,
         motifs: motifsCount
@@ -765,13 +773,22 @@ app.get('/timesheet/annual', auth, async (req, res) => {
   }
 });
 
-// Mettre à jour les heures de contrat d'un utilisateur (admin)
+// Mettre à jour l'horaire de base d'un utilisateur (admin) : heures/semaine, jours/semaine, contrat mensuel
 app.put('/timesheet/users/:id/contrat', auth, adminOnly, async (req, res) => {
-  const { heures_contrat_mois } = req.body;
-  if (!heures_contrat_mois) return res.status(400).json({ error: 'Valeur requise' });
+  const { heures_contrat_mois, heures_semaine_base, jours_semaine_base } = req.body;
+  if (heures_contrat_mois == null && heures_semaine_base == null && jours_semaine_base == null) {
+    return res.status(400).json({ error: 'Valeur requise' });
+  }
+  const sets = [];
+  const values = [];
+  if (heures_contrat_mois != null) { values.push(heures_contrat_mois); sets.push(`heures_contrat_mois=$${values.length}`); }
+  if (heures_semaine_base != null) { values.push(heures_semaine_base); sets.push(`heures_semaine_base=$${values.length}`); }
+  if (jours_semaine_base != null) { values.push(jours_semaine_base); sets.push(`jours_semaine_base=$${values.length}`); }
+  values.push(req.params.id);
   try {
-    await pool.query(`UPDATE users SET heures_contrat_mois=$1 WHERE id=$2`, [heures_contrat_mois, req.params.id]);
-    res.json({ ok: true });
+    await pool.query(`UPDATE users SET ${sets.join(', ')} WHERE id=$${values.length}`, values);
+    const result = await pool.query(`SELECT id, display_name, initiales, heures_contrat_mois, heures_semaine_base, jours_semaine_base FROM users WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true, user: result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -795,7 +812,7 @@ app.get('/timesheet/export', auth, async (req, res) => {
   try {
     const [entriesRes, userRes] = await Promise.all([
       pool.query(`SELECT * FROM timesheet_entries WHERE user_id=$1 AND date >= $2::date AND date < ($2::date + INTERVAL '1 month') ORDER BY date`, [targetUserId, `${mois}-01`]),
-      pool.query(`SELECT display_name, initiales, heures_contrat_mois FROM users WHERE id=$1`, [targetUserId])
+      pool.query(`SELECT display_name, initiales, heures_contrat_mois, heures_semaine_base, jours_semaine_base FROM users WHERE id=$1`, [targetUserId])
     ]);
     const user = userRes.rows[0];
     const entriesMap = {};
@@ -823,6 +840,9 @@ app.get('/timesheet/export', auth, async (req, res) => {
     sheet.getCell('C4').value = user.display_name;
     sheet.getCell('F4').value = 'HEURES CONTRAT/MOIS';
     sheet.getCell('H4').value = parseFloat(user.heures_contrat_mois);
+    sheet.getCell('B5').value = 'Horaire de base';
+    sheet.getCell('C5').value = `${parseFloat(user.heures_semaine_base) || 35}h / semaine sur ${parseFloat(user.jours_semaine_base) || 5} j`;
+    sheet.getCell('B5').font = { bold: true };
     [3,4].forEach(r => { sheet.getCell(`B${r}`).font = { bold: true }; sheet.getCell(`F${r}`).font = { bold: true }; });
 
     const headerRow = 6;
