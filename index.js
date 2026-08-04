@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { Pool } = require('pg');
+const pool = require('./db');
 const cors = require('cors');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
@@ -18,11 +18,6 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(webexRoutes);
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
 
 const JWT_SECRET =
   process.env.JWT_SECRET ||
