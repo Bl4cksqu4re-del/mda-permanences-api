@@ -71,11 +71,29 @@ app.post('/change-password', auth, async (req, res) => {
   if (!current_password || !new_password) return res.status(400).json({ error: 'Champs manquants' });
   if (new_password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caractères minimum)' });
   try {
-    const result = await pool.query('SELECT * FROM users WHERE id=$1', [req.user.id]);
-    const user = result.rows[0];
-    if (!user || user.password_hash !== hashPassword(current_password)) {
-      return res.status(401).json({ error: 'Mot de passe actuel incorrect' });
-    }
+    const result = await pool.query(
+  'SELECT * FROM users WHERE username=$1',
+  [username]
+);
+
+const user = result.rows[0];
+
+if (!user) {
+  return res.status(401).json({
+    error: 'Identifiant ou mot de passe incorrect'
+  });
+}
+
+const validPassword = await bcrypt.compare(
+  password,
+  user.password_hash
+);
+
+if (!validPassword) {
+  return res.status(401).json({
+    error: 'Identifiant ou mot de passe incorrect'
+  });
+}
     await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hashPassword(new_password), req.user.id]);
     res.json({ ok: true });
   } catch (err) {
