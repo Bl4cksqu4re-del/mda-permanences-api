@@ -130,11 +130,12 @@ router.get('/webex/stats', auth, async (req, res) => {
         overflow: 0, transferred: 0, timed: 0,
         tauxDecroche: 0, attenteMoy: null, dureeMoy: null, appelantsUniques: null, rappelsSortants: [],
         parHeure: [], parJour: [], parAgent: [],
-        lastImport: last_import, dataRange: { min: min_date, max: max_date }
+        lastImport: last_import, dataRange: { min: min_date, max: max_date },
+        couverture: { joursDemandes: 0, joursGroupStats: 0, joursCallDetails: 0 }
       });
     }
 
-    const [totaux, parHeure, parJour, parAgent, appelantsUniquesRes, rappelsRes] = await Promise.all([
+    const [totaux, parHeure, parJour, parAgent, appelantsUniquesRes, rappelsRes, joursGroupRes, joursCallsRes] = await Promise.all([
       pool.query(`
         SELECT
           COALESCE(SUM(answered),0) AS answered,
@@ -189,7 +190,12 @@ router.get('/webex/stats', auth, async (req, res) => {
         FROM webex_calls
         WHERE numero_appelant = numero_tel AND date_appel BETWEEN $1 AND $2
         GROUP BY numero_tel
-      `, [periodeFrom, periodeTo]).catch(() => ({ rows: [] }))
+      `, [periodeFrom, periodeTo]).catch(() => ({ rows: [] })),
+      // Couverture réelle de chaque source sur la période sélectionnée, pour repérer les
+      // incohérences dues à des imports partiels (ex: CallDetails importé pour 5 jours
+      // seulement alors que group_statistics couvre tout le mois).
+      pool.query(`SELECT COUNT(DISTINCT stat_date) AS n FROM webex_group_stats WHERE stat_date BETWEEN $1 AND $2`, [periodeFrom, periodeTo]),
+      pool.query(`SELECT COUNT(DISTINCT date_appel) AS n FROM webex_calls WHERE date_appel BETWEEN $1 AND $2`, [periodeFrom, periodeTo]).catch(() => ({ rows: [{ n: 0 }] }))
     ]);
 
     const t = totaux.rows[0];
@@ -202,6 +208,10 @@ router.get('/webex/stats', auth, async (req, res) => {
 
     const talkTimeTotal = parAgent.rows.reduce((s, a) => s + (parseInt(a.talk_time_sec) || 0), 0);
     const callsAnsweredTotal = parAgent.rows.reduce((s, a) => s + (parseInt(a.calls_answered) || 0), 0);
+
+    const joursDemandes = Math.round((new Date(periodeTo) - new Date(periodeFrom)) / 86400000) + 1;
+    const joursGroupStats = parseInt(joursGroupRes.rows[0].n) || 0;
+    const joursCallDetails = parseInt(joursCallsRes.rows[0].n) || 0;
 
     res.json({
       periode: { from: periodeFrom, to: periodeTo },
@@ -242,7 +252,12 @@ router.get('/webex/stats', auth, async (req, res) => {
         tempsPresence: parseInt(a.presence_time_sec) || 0
       })),
       lastImport: last_import,
-      dataRange: { min: min_date, max: max_date }
+      dataRange: { min: min_date, max: max_date },
+      couverture: {
+        joursDemandes,
+        joursGroupStats,
+        joursCallDetails
+      }
     });
   } catch (err) {
     res.status(500).json({
