@@ -91,6 +91,17 @@ function dateDepuisNomFichier(filename) {
   return `${annee}-${mois}-${jour}`;
 }
 
+// Correspondance poste direct → personne, pour les appels sortants (rappels) repérés dans
+// CallDetails.csv via numero_appelant == numero_tel. Uniquement les postes individuels connus
+// (pas la ligne principale ni la file interne, qui ne représentent personne en particulier).
+const POSTES_MDA = {
+  '+33142256826': 'Charlotte KENT',
+  '+33142256828': 'Kim REED',
+  '+33185141391': 'Victoria CORDA',
+  '+33185141390': 'Loic VOLAT',
+  '+33142256829': 'Antoine STORCK'
+};
+
 /*
  * TEST / STATS
  */
@@ -117,13 +128,13 @@ router.get('/webex/stats', auth, async (req, res) => {
         periode: { from: null, to: null },
         total: 0, answered: 0, abandoned: 0,
         overflow: 0, transferred: 0, timed: 0,
-        tauxDecroche: 0, attenteMoy: null, dureeMoy: null, appelantsUniques: null,
+        tauxDecroche: 0, attenteMoy: null, dureeMoy: null, appelantsUniques: null, rappelsSortants: [],
         parHeure: [], parJour: [], parAgent: [],
         lastImport: last_import, dataRange: { min: min_date, max: max_date }
       });
     }
 
-    const [totaux, parHeure, parJour, parAgent, appelantsUniquesRes] = await Promise.all([
+    const [totaux, parHeure, parJour, parAgent, appelantsUniquesRes, rappelsRes] = await Promise.all([
       pool.query(`
         SELECT
           COALESCE(SUM(answered),0) AS answered,
@@ -166,7 +177,19 @@ router.get('/webex/stats', auth, async (req, res) => {
       // webex_calls est optionnelle (Phase C) : si la table n'existe pas encore, on continue sans ce chiffre
       pool.query(`
         SELECT COUNT(DISTINCT numero_appelant) AS n FROM webex_calls WHERE date_appel BETWEEN $1 AND $2
-      `, [periodeFrom, periodeTo]).catch(() => ({ rows: [{ n: null }] }))
+      `, [periodeFrom, periodeTo]).catch(() => ({ rows: [{ n: null }] })),
+      // Rappels sortants par personne (numero_appelant == numero_tel = c'est cette personne qui a appelé).
+      // Uniquement disponible sur les CallDetails.csv scopés sur un poste individuel — pas dans les exports
+      // par file d'attente, qui ne contiennent que de l'entrant.
+      pool.query(`
+        SELECT numero_tel,
+          COUNT(*) AS sortants,
+          COUNT(DISTINCT numero_appele) AS numeros_uniques,
+          SUM(duree_sec) AS duree_totale
+        FROM webex_calls
+        WHERE numero_appelant = numero_tel AND date_appel BETWEEN $1 AND $2
+        GROUP BY numero_tel
+      `, [periodeFrom, periodeTo]).catch(() => ({ rows: [] }))
     ]);
 
     const t = totaux.rows[0];
@@ -187,6 +210,15 @@ router.get('/webex/stats', auth, async (req, res) => {
       attenteMoy: t.attente_moy != null ? Math.round(parseFloat(t.attente_moy)) : null,
       dureeMoy: callsAnsweredTotal > 0 ? Math.round(talkTimeTotal / callsAnsweredTotal) : null,
       appelantsUniques: appelantsUniquesRes.rows[0].n != null ? parseInt(appelantsUniquesRes.rows[0].n) : null,
+      rappelsSortants: rappelsRes.rows
+        .filter(r => POSTES_MDA[r.numero_tel])
+        .map(r => ({
+          nom: POSTES_MDA[r.numero_tel],
+          sortants: parseInt(r.sortants) || 0,
+          numerosUniques: parseInt(r.numeros_uniques) || 0,
+          dureeTotale: parseInt(r.duree_totale) || 0
+        }))
+        .sort((a, b) => b.sortants - a.sortants),
       parHeure: parHeure.rows.map(r => ({
         heure: r.stat_hour,
         total: (parseInt(r.answered)||0) + (parseInt(r.abandoned)||0) + (parseInt(r.overflow)||0) + (parseInt(r.transferred)||0) + (parseInt(r.timed)||0),
