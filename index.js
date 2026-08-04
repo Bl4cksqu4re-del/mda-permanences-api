@@ -17,7 +17,6 @@ app.use(cors({
 }));
 app.options('*', cors());
 app.use(express.json({ limit: '20mb' }));
-app.use(webexRoutes);
 
 const JWT_SECRET =
   process.env.JWT_SECRET ||
@@ -341,6 +340,7 @@ app.get('/webex/callback', async (req, res) => {
     res.status(500).send(`Erreur: ${err.message}`);
   }
 });
+app.use(webexRoutes);
 
 app.use(auth);
 
