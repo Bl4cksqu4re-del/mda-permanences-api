@@ -5,6 +5,42 @@ const router = express.Router();
 
 console.log('WEBEX ROUTES LOADED');
 
+function parseCsvLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+
+    if (inQuotes) {
+      if (char === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += char;
+      }
+    } else {
+      if (char === '"') {
+        inQuotes = true;
+      } else if (char === ',') {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+  }
+
+  result.push(current.trim());
+
+  return result;
+}
+
 /*
  * TEST / STATS
  */
