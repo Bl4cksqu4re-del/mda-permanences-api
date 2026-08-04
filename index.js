@@ -1,4 +1,5 @@
 require('dotenv').config();
+
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
@@ -20,7 +21,29 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const JWT_SECRET = process.env.JWT_SECRET || process.env.API_SECRET || 'mda-secret-2026';
+const JWT_SECRET =
+  process.env.JWT_SECRET ||
+  process.env.API_SECRET;
+const WEBEX_CLIENT_ID =
+  process.env.WEBEX_CLIENT_ID;
+
+const WEBEX_CLIENT_SECRET =
+  process.env.WEBEX_CLIENT_SECRET;
+
+const WEBEX_REDIRECT_URI =
+  process.env.WEBEX_REDIRECT_URI;
+
+const WEBEX_SCOPES =
+  process.env.WEBEX_SCOPES || 'spark:all';
+
+let webexToken = null;
+let webexTokenExpiry = null;
+
+if (!JWT_SECRET) {
+  throw new Error(
+    'JWT_SECRET ou API_SECRET manquant'
+  );
+}
 
 async function hashPassword(password) {
   return bcrypt.hash(password, 12);
@@ -47,57 +70,124 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 /* Login */
 app.post('/login', async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Identifiants manquants' });
+
+  if (!username || !password) {
+    return res.status(400).json({
+      error: 'Identifiants manquants'
+    });
+  }
+
   try {
-    const result = await pool.query('SELECT * FROM users WHERE username=$1', [username]);
+    const result = await pool.query(
+      'SELECT * FROM users WHERE username=$1',
+      [username]
+    );
+
     const user = result.rows[0];
-    if (!user || user.password_hash !== hashPassword(password)) {
-      return res.status(401).json({ error: 'Identifiant ou mot de passe incorrect' });
+
+    if (!user) {
+      return res.status(401).json({
+        error: 'Identifiant ou mot de passe incorrect'
+      });
     }
+
+    const validPassword = await bcrypt.compare(
+      password,
+      user.password_hash
+    );
+
+    if (!validPassword) {
+      return res.status(401).json({
+        error: 'Identifiant ou mot de passe incorrect'
+      });
+    }
+
     const token = jwt.sign(
-      { id: user.id, username: user.username, display_name: user.display_name, initiales: user.initiales, is_admin: user.is_admin },
+      {
+        id: user.id,
+        username: user.username,
+        display_name: user.display_name,
+        initiales: user.initiales,
+        is_admin: user.is_admin
+      },
       JWT_SECRET,
       { expiresIn: '12h' }
     );
-    res.json({ token, user: { id: user.id, username: user.username, display_name: user.display_name, initiales: user.initiales, is_admin: user.is_admin } });
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        display_name: user.display_name,
+        initiales: user.initiales,
+        is_admin: user.is_admin
+      }
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      error: err.message
+    });
   }
 });
 
 /* Changer son mot de passe */
 app.post('/change-password', auth, async (req, res) => {
   const { current_password, new_password } = req.body;
-  if (!current_password || !new_password) return res.status(400).json({ error: 'Champs manquants' });
-  if (new_password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caractères minimum)' });
+
+  if (!current_password || !new_password) {
+    return res.status(400).json({
+      error: 'Champs manquants'
+    });
+  }
+
+  if (new_password.length < 6) {
+    return res.status(400).json({
+      error: 'Mot de passe trop court (6 caractères minimum)'
+    });
+  }
+
   try {
     const result = await pool.query(
-  'SELECT * FROM users WHERE username=$1',
-  [username]
-);
+      'SELECT * FROM users WHERE id=$1',
+      [req.user.id]
+    );
 
-const user = result.rows[0];
+    const user = result.rows[0];
 
-if (!user) {
-  return res.status(401).json({
-    error: 'Identifiant ou mot de passe incorrect'
-  });
-}
+    if (!user) {
+      return res.status(401).json({
+        error: 'Mot de passe actuel incorrect'
+      });
+    }
 
-const validPassword = await bcrypt.compare(
-  password,
-  user.password_hash
-);
+    const validPassword = await bcrypt.compare(
+      current_password,
+      user.password_hash
+    );
 
-if (!validPassword) {
-  return res.status(401).json({
-    error: 'Identifiant ou mot de passe incorrect'
-  });
-}
-    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hashPassword(new_password), req.user.id]);
-    res.json({ ok: true });
+    if (!validPassword) {
+      return res.status(401).json({
+        error: 'Mot de passe actuel incorrect'
+      });
+    }
+
+    const hashedPassword = await hashPassword(
+      new_password
+    );
+
+    await pool.query(
+      'UPDATE users SET password_hash=$1 WHERE id=$2',
+      [hashedPassword, req.user.id]
+    );
+
+    res.json({
+      ok: true
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      error: err.message
+    });
   }
 });
 
@@ -118,7 +208,13 @@ app.post('/users', auth, adminOnly, async (req, res) => {
   try {
     const result = await pool.query(
       'INSERT INTO users (username, password_hash, display_name, initiales, is_admin) VALUES ($1,$2,$3,$4,$5) RETURNING id, username, display_name, initiales, is_admin',
-      [username, hashPassword(password), display_name, initiales.toUpperCase(), !!is_admin]
+[
+  username,
+  await hashPassword(password),
+  display_name,
+  initiales.toUpperCase(),
+  !!is_admin
+]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -131,7 +227,14 @@ app.put('/users/:id/reset-password', auth, adminOnly, async (req, res) => {
   const { new_password } = req.body;
   if (!new_password || new_password.length < 6) return res.status(400).json({ error: 'Mot de passe trop court' });
   try {
-    await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2', [hashPassword(new_password), req.params.id]);
+const hashedPassword = await hashPassword(
+  new_password
+);
+
+await pool.query(
+  'UPDATE users SET password_hash=$1 WHERE id=$2',
+  [hashedPassword, req.params.id]
+);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
