@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const ExcelJS = require('exceljs');
-// const webexRoutes = require('./routes/webex');
+const webexRoutes = require('./routes/webex');
 
 const app = express();
 app.use(cors({
@@ -17,7 +17,7 @@ app.use(cors({
 }));
 app.options('*', cors());
 app.use(express.json({ limit: '20mb' }));
-// app.use(webexRoutes);
+app.use(webexRoutes);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
