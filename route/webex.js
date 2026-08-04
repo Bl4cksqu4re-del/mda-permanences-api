@@ -74,6 +74,13 @@ function parseNombre(str) {
   return isNaN(n) ? null : n;
 }
 
+// Format attendu : "YYYY-MM-DD HH:MM:SS" (colonne "Date/heure de début" de CallDetails.csv)
+function parseDureeToDatetime(str) {
+  if (!str) return null;
+  const d = new Date(str.trim().replace(' ', 'T'));
+  return isNaN(d.getTime()) ? null : d;
+}
+
 // agent_statistics.csv n'a pas de colonne date : Webex exporte un fichier par jour,
 // la date est uniquement portée par le nom de fichier ("20260113_000000_agent_statistics.csv").
 function dateDepuisNomFichier(filename) {
@@ -110,13 +117,13 @@ router.get('/webex/stats', auth, async (req, res) => {
         periode: { from: null, to: null },
         total: 0, answered: 0, abandoned: 0,
         overflow: 0, transferred: 0, timed: 0,
-        tauxDecroche: 0, attenteMoy: null, dureeMoy: null,
+        tauxDecroche: 0, attenteMoy: null, dureeMoy: null, appelantsUniques: null,
         parHeure: [], parJour: [], parAgent: [],
         lastImport: last_import, dataRange: { min: min_date, max: max_date }
       });
     }
 
-    const [totaux, parHeure, parJour, parAgent] = await Promise.all([
+    const [totaux, parHeure, parJour, parAgent, appelantsUniquesRes] = await Promise.all([
       pool.query(`
         SELECT
           COALESCE(SUM(answered),0) AS answered,
@@ -155,7 +162,11 @@ router.get('/webex/stats', auth, async (req, res) => {
         FROM webex_agent_stats
         WHERE stat_date BETWEEN $1 AND $2
         GROUP BY agent_name ORDER BY calls_answered DESC
-      `, [periodeFrom, periodeTo])
+      `, [periodeFrom, periodeTo]),
+      // webex_calls est optionnelle (Phase C) : si la table n'existe pas encore, on continue sans ce chiffre
+      pool.query(`
+        SELECT COUNT(DISTINCT numero_appelant) AS n FROM webex_calls WHERE date_appel BETWEEN $1 AND $2
+      `, [periodeFrom, periodeTo]).catch(() => ({ rows: [{ n: null }] }))
     ]);
 
     const t = totaux.rows[0];
@@ -175,6 +186,7 @@ router.get('/webex/stats', auth, async (req, res) => {
       tauxDecroche: total > 0 ? Math.round((answered / total) * 100) : 0,
       attenteMoy: t.attente_moy != null ? Math.round(parseFloat(t.attente_moy)) : null,
       dureeMoy: callsAnsweredTotal > 0 ? Math.round(talkTimeTotal / callsAnsweredTotal) : null,
+      appelantsUniques: appelantsUniquesRes.rows[0].n != null ? parseInt(appelantsUniquesRes.rows[0].n) : null,
       parHeure: parHeure.rows.map(r => ({
         heure: r.stat_hour,
         total: (parseInt(r.answered)||0) + (parseInt(r.abandoned)||0) + (parseInt(r.overflow)||0) + (parseInt(r.transferred)||0) + (parseInt(r.timed)||0),
@@ -423,11 +435,107 @@ router.post('/webex/import/agents', auth, async (req, res) => {
   }
 });
 
-router.post('/webex/import/calls', auth, (req, res) => {
-  res.json({
-    ok: true,
-    message: 'Import appels'
-  });
+router.post('/webex/import/calls', auth, async (req, res) => {
+  try {
+    const { csv, filename } = req.body;
+
+    if (!csv) {
+      return res.status(400).json({ error: 'CSV manquant' });
+    }
+    if (!filename) {
+      return res.status(400).json({ error: "Nom de fichier requis (sert de clé pour un ré-import propre)" });
+    }
+
+    const lines = csv.split('\n').filter(l => l.trim());
+    if (lines.length < 2) {
+      return res.status(400).json({ error: 'CSV vide ou illisible' });
+    }
+
+    const delimiteur = detecterDelimiteur(lines[0]);
+    const rows = [];
+    const erreurs = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const cols = parseCsvLine(lines[i], delimiteur);
+      if (cols.length < 9) {
+        erreurs.push(`Ligne ${i + 1} : ${cols.length} colonne(s) au lieu de 9 attendues`);
+        continue;
+      }
+      const [numeroTel, appelant, appele, interlocuteur, dateStr, heureStr, debutStr, , dureeStr] = cols;
+      if (!dateStr || !appelant) {
+        erreurs.push(`Ligne ${i + 1} : appelant ou date manquant`);
+        continue;
+      }
+      const dp = dateStr.split('/');
+      if (dp.length !== 3) {
+        erreurs.push(`Ligne ${i + 1} : date illisible ("${dateStr}")`);
+        continue;
+      }
+      const dateISO = `${dp[2]}-${dp[1].padStart(2, '0')}-${dp[0].padStart(2, '0')}`;
+      rows.push({
+        numeroTel: numeroTel || null,
+        appelant,
+        appele: appele || null,
+        interlocuteur: interlocuteur || null,
+        dateISO,
+        heureStr: heureStr || null,
+        debut: parseDureeToDatetime(debutStr),
+        dureeSec: dureeVersSecondes(dureeStr)
+      });
+    }
+
+    if (rows.length === 0) {
+      return res.status(400).json({
+        error: 'Aucune ligne exploitable dans ce CSV',
+        erreurs: erreurs.slice(0, 10)
+      });
+    }
+
+    // Stockage brut, sans fusion : une ligne CSV = une ligne en base.
+    // Dédoublonnage par fichier source (pas par contenu) : plusieurs lignes distinctes peuvent
+    // légitimement partager (appelant, appelé, date, heure, durée) — vérifié sur données réelles,
+    // ~15 à 20% de collisions sur ces seuls champs. Un ré-import du même fichier remplace donc
+    // ses lignes plutôt que de tenter une déduplication au contenu, peu fiable.
+    const deleted = await pool.query(`DELETE FROM webex_calls WHERE source_file = $1`, [filename]);
+
+    const BATCH = 300;
+    for (let i = 0; i < rows.length; i += BATCH) {
+      const batch = rows.slice(i, i + BATCH);
+      const values = [];
+      const placeholders = [];
+      batch.forEach((r, idx) => {
+        const base = idx * 9;
+        placeholders.push(`($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9})`);
+        values.push(filename, r.numeroTel, r.appelant, r.appele, r.interlocuteur, r.dateISO, r.heureStr, r.debut, r.dureeSec);
+      });
+      await pool.query(`
+        INSERT INTO webex_calls
+          (source_file, numero_tel, numero_appelant, numero_appele, interlocuteur, date_appel, heure_appel, debut, duree_sec)
+        VALUES ${placeholders.join(',')}`,
+        values
+      );
+    }
+
+    const dateMin = rows.reduce((m, r) => !m || r.dateISO < m ? r.dateISO : m, null);
+    const dateMax = rows.reduce((m, r) => !m || r.dateISO > m ? r.dateISO : m, null);
+
+    await pool.query(`
+      INSERT INTO import_log (imported_by, filename, total, inserted, updated, date_min, date_max)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [req.user.display_name || req.user.username, filename, rows.length, rows.length, deleted.rowCount, dateMin, dateMax]
+    );
+
+    res.json({
+      ok: true,
+      total: rows.length,
+      inserted: rows.length,
+      updated: deleted.rowCount,
+      erreurs: erreurs.length ? erreurs.slice(0, 10) : undefined
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
