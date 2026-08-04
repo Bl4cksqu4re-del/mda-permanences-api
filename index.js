@@ -120,12 +120,12 @@ app.post('/login', async (req, res) => {
     }
 
     if (!validPassword) {
-      return res.status(401).json({
-        error: 'Identifiant ou mot de passe incorrect'
-      });
-    }
+  return res.status(401).json({
+    error: 'Identifiant ou mot de passe incorrect'
+  });
+}
 
-    const token = jwt.sign(
+const token = jwt.sign(
       {
         id: user.id,
         username: user.username,
@@ -1116,7 +1116,11 @@ app.get('/timesheet/export', auth, async (req, res) => {
     sheet.getCell(totalRow+1, 5).value = 'Contrat';
     sheet.getCell(totalRow+1, 6).value = parseFloat(user.heures_contrat_mois);
     sheet.getCell(totalRow+2, 5).value = 'Écart';
-    sheet.getCell(totalRow+2, 6).value = Math.round((totalReg - parseFloat(user.heures_contrat_mois))*100)/100;
+    sheet.getCell(totalRow+2, 6).value =
+  Math.round(
+    ((totalReg + totalSup) - parseFloat(user.heures_contrat_mois))
+    * 100
+  ) / 100;
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="feuille_temps_${user.initiales}_${mois}.xlsx"`);
