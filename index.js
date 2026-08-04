@@ -3,9 +3,9 @@ require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
+const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const ExcelJS = require('exceljs');
 
 const app = express();
 app.use(cors({
@@ -48,7 +48,12 @@ if (!JWT_SECRET) {
 async function hashPassword(password) {
   return bcrypt.hash(password, 12);
 }
-
+function legacyHashPassword(password) {
+  return crypto
+    .createHash('sha256')
+    .update(password)
+    .digest('hex');
+}
 function auth(req, res, next) {
   const token = req.headers['authorization'] || req.query.token;
   if (!token) return res.status(401).json({ error: 'Non autorisé' });
@@ -91,15 +96,35 @@ app.post('/login', async (req, res) => {
       });
     }
 
-    const validPassword = await bcrypt.compare(
-      password,
-      user.password_hash
+    let validPassword = false;
+
+if (user.password_hash.startsWith('$2')) {
+  validPassword = await bcrypt.compare(
+    password,
+    user.password_hash
+  );
+} else {
+  validPassword =
+    user.password_hash ===
+    legacyHashPassword(password);
+
+  if (validPassword) {
+    const newHash = await hashPassword(
+      password
     );
 
-    if (!validPassword) {
-      return res.status(401).json({
-        error: 'Identifiant ou mot de passe incorrect'
-      });
+    await pool.query(
+      'UPDATE users SET password_hash=$1 WHERE id=$2',
+      [newHash, user.id]
+    );
+  }
+}
+
+if (!validPassword) {
+  return res.status(401).json({
+    error: 'Identifiant ou mot de passe incorrect'
+  });
+}
     }
 
     const token = jwt.sign(
