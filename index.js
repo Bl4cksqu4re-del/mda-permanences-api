@@ -426,71 +426,143 @@ function parseDuree(dureeStr) {
   return 0;
 }
 
+function parseDureeToDatetime(str) {
+  // Format attendu : "YYYY-MM-DD HH:MM:SS"
+  if (!str) return null;
+  const d = new Date(str.trim().replace(' ', 'T'));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Parseur CSV correct (gère les champs vides et les valeurs entre guillemets),
+// contrairement à un simple split(',') / regex qui décale les colonnes dès qu'un champ est vide.
+function parseCsvLine(line) {
+  const result = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = false;
+      } else cur += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { result.push(cur.trim()); cur = ''; }
+      else cur += c;
+    }
+  }
+  result.push(cur.trim());
+  return result;
+}
+
 app.post('/calls/import', auth, async (req, res) => {
-  const { csv } = req.body;
+  const { csv, filename } = req.body;
   if (!csv) return res.status(400).json({ error: 'CSV manquant' });
 
   try {
     const lines = csv.split('\n').filter(l => l.trim());
     const rows = [];
     for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].match(/(".*?"|[^,]+)(?=,|$)/g) || [];
-      const clean = cols.map(c => c.replace(/^"|"$/g, '').trim());
+      const clean = parseCsvLine(lines[i]);
       if (clean.length < 9) continue;
-      const [numTel, appelant, , interlocuteur, dateStr, heureStr, , , dureeStr] = clean;
+      const [numTel, appelant, appele, interlocuteur, dateStr, heureStr, debutStr, , dureeStr] = clean;
       if (!dateStr || !appelant) continue;
       const dp = dateStr.split('/');
       if (dp.length !== 3) continue;
       const dateISO = `${dp[2]}-${dp[1].padStart(2,'0')}-${dp[0].padStart(2,'0')}`;
-      rows.push({ appelant, dateISO, heureStr, interlocuteur, dureeStr });
+      const ts = new Date(dateISO + 'T' + heureStr + ':00');
+      rows.push({ appelant, appele, numTel, dateISO, heureStr, interlocuteur, dureeStr, debutStr, ts });
     }
 
-    // Grouper par (appelant, date, heure)
-    const groups = new Map();
+    if (rows.length === 0) {
+      return res.status(400).json({ error: 'Aucune ligne exploitable dans ce CSV (format inattendu ?)' });
+    }
+
+    // Regroupement en appels réels : la ligne "file d'appel" (Numéro appelé = numéro principal)
+    // et les lignes "poste sonné" (Charlotte/Kim/Loïc/Victoria...) du même appel ne partagent pas
+    // toujours la même minute exacte dans l'export Orange Business — on fusionne donc par appelant,
+    // en regroupant les lignes consécutives séparées de moins de 2 min 30.
+    rows.sort((a, b) => a.appelant === b.appelant ? a.ts - b.ts : (a.appelant < b.appelant ? -1 : 1));
+    const FENETRE_MS = 150 * 1000;
+    const groups = [];
+    let current = null;
     for (const r of rows) {
-      const key = `${r.appelant}|${r.dateISO}|${r.heureStr}`;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(r);
+      if (current && current.appelant === r.appelant && (r.ts - current.lastTs) <= FENETRE_MS) {
+        current.rows.push(r);
+        current.lastTs = r.ts;
+      } else {
+        current = { appelant: r.appelant, lastTs: r.ts, rows: [r] };
+        groups.push(current);
+      }
     }
 
-    const entries = [...groups.entries()];
     let inserted = 0, updated = 0;
     const BATCH = 200;
 
-    for (let i = 0; i < entries.length; i += BATCH) {
-      const batch = entries.slice(i, i + BATCH);
+    for (let i = 0; i < groups.length; i += BATCH) {
+      const batch = groups.slice(i, i + BATCH);
       const values = [];
       const placeholders = [];
-      batch.forEach(([key, lines], idx) => {
-        const [appelant, dateISO, heureStr] = key.split('|');
-        let decroche = false, repondant = null, dureeSec = 0;
-        for (const l of lines) {
-          if (isTeamMember(l.interlocuteur) && l.dureeStr) {
-            decroche = true;
-            repondant = l.interlocuteur;
-            dureeSec = parseDuree(l.dureeStr);
-            break;
+      batch.forEach((g, idx) => {
+        const first = g.rows[0]; // ligne la plus ancienne du groupe : sert de clé stable (date/heure canoniques)
+        let decroche = false, repondant = null, dureeSec = 0, attenteSec = null;
+
+        const ligneDecroche = g.rows.find(l => isTeamMember(l.interlocuteur) && l.dureeStr);
+        const ligneFile = g.rows.find(l => l.appele === l.numTel); // ligne "file d'appel" (numéro appelé = numéro principal)
+
+        if (ligneDecroche) {
+          decroche = true;
+          repondant = ligneDecroche.interlocuteur;
+          dureeSec = parseDuree(ligneDecroche.dureeStr);
+          const debutFile = ligneFile ? parseDureeToDatetime(ligneFile.debutStr) : null;
+          const debutDecroche = parseDureeToDatetime(ligneDecroche.debutStr);
+          if (debutFile && debutDecroche) {
+            attenteSec = Math.max(0, Math.round((debutDecroche - debutFile) / 1000));
           }
         }
-        const base = idx * 6;
-        placeholders.push(`($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6})`);
-        values.push(appelant, dateISO, heureStr, decroche, repondant, dureeSec);
+
+        const base = idx * 7;
+        placeholders.push(`($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7})`);
+        values.push(g.appelant, first.dateISO, first.heureStr, decroche, repondant, dureeSec, attenteSec);
       });
 
       const result = await pool.query(`
-        INSERT INTO calls (numero_appelant, date_appel, heure_appel, decroche, repondant, duree_sec)
+        INSERT INTO calls (numero_appelant, date_appel, heure_appel, decroche, repondant, duree_sec, attente_sec)
         VALUES ${placeholders.join(',')}
         ON CONFLICT (numero_appelant, date_appel, heure_appel)
-        DO UPDATE SET decroche=EXCLUDED.decroche, repondant=EXCLUDED.repondant, duree_sec=EXCLUDED.duree_sec
+        DO UPDATE SET decroche=EXCLUDED.decroche, repondant=EXCLUDED.repondant, duree_sec=EXCLUDED.duree_sec, attente_sec=EXCLUDED.attente_sec
         RETURNING (xmax = 0) AS inserted`,
         values
       );
       result.rows.forEach(r => { if (r.inserted) inserted++; else updated++; });
     }
 
-    res.json({ ok: true, total: groups.size, inserted, updated });
+    const dateMin = rows.reduce((m, r) => !m || r.dateISO < m ? r.dateISO : m, null);
+    const dateMax = rows.reduce((m, r) => !m || r.dateISO > m ? r.dateISO : m, null);
+
+    const logResult = await pool.query(`
+      INSERT INTO import_log (imported_by, filename, total, inserted, updated, date_min, date_max)
+      VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, imported_at`,
+      [req.user.display_name || req.user.username, filename || null, groups.length, inserted, updated, dateMin, dateMax]
+    );
+
+    res.json({
+      ok: true, total: groups.length, inserted, updated,
+      importId: logResult.rows[0].id, importedAt: logResult.rows[0].imported_at
+    });
   } catch (err) {
     console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Historique des imports CSV
+app.get('/calls/imports', auth, async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT id, imported_by, filename, total, inserted, updated, date_min, date_max, imported_at FROM import_log ORDER BY imported_at DESC LIMIT 100`);
+    res.json(result.rows);
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -504,12 +576,13 @@ app.get('/calls/stats', auth, async (req, res) => {
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
   try {
-    const [totals, parRepondant, parJour, parHeure, bounds] = await Promise.all([
-      pool.query(`SELECT COUNT(*) AS total, SUM(decroche::int) AS decroches, SUM(duree_sec) AS duree_total, AVG(CASE WHEN decroche THEN duree_sec END) AS duree_moy FROM calls ${where}`, values),
+    const [totals, parRepondant, parJour, parHeure, bounds, appelantsUniques] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS total, SUM(decroche::int) AS decroches, SUM(duree_sec) AS duree_total, AVG(CASE WHEN decroche THEN duree_sec END) AS duree_moy, AVG(attente_sec) AS attente_moy FROM calls ${where}`, values),
       pool.query(`SELECT repondant, COUNT(*) AS appels, SUM(duree_sec) AS duree FROM calls ${where} ${where ? 'AND' : 'WHERE'} decroche=TRUE GROUP BY repondant ORDER BY appels DESC`, values),
       pool.query(`SELECT date_appel, COUNT(*) AS total, SUM(decroche::int) AS decroches, SUM(CASE WHEN decroche THEN duree_sec ELSE 0 END) AS duree FROM calls ${where} GROUP BY date_appel ORDER BY date_appel DESC`, values),
       pool.query(`SELECT heure_appel, COUNT(*) AS total FROM calls ${where} GROUP BY heure_appel`, values),
-      pool.query(`SELECT MIN(date_appel) AS min_date, MAX(date_appel) AS max_date, MAX(imported_at) AS last_import FROM calls`)
+      pool.query(`SELECT MIN(date_appel) AS min_date, MAX(date_appel) AS max_date, MAX(imported_at) AS last_import FROM calls`),
+      pool.query(`SELECT COUNT(DISTINCT numero_appelant) AS n FROM calls ${where}`, values)
     ]);
 
     const t = totals.rows[0];
@@ -529,6 +602,8 @@ app.get('/calls/stats', auth, async (req, res) => {
       total, decroches, nonDecroches: total - decroches,
       dureeTotal: parseInt(t.duree_total) || 0,
       dureeMoy: Math.round(parseFloat(t.duree_moy)) || 0,
+      attenteMoy: t.attente_moy != null ? Math.round(parseFloat(t.attente_moy)) : null,
+      appelantsUniques: parseInt(appelantsUniques.rows[0].n) || 0,
       parRepondant: parRepondant.rows.map(r => ({ nom: r.repondant, appels: parseInt(r.appels), duree: parseInt(r.duree) })),
       parJour: parJour.rows.map(r => ({ date: r.date_appel.toISOString().slice(0,10), total: parseInt(r.total), decroches: parseInt(r.decroches), duree: parseInt(r.duree) })),
       parHeure: Object.entries(heuresMap).sort(([a],[b]) => a.localeCompare(b)).map(([h,v]) => ({ heure: h, total: v })),
