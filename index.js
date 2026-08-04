@@ -21,20 +21,7 @@ app.use(express.json({ limit: '20mb' }));
 const JWT_SECRET =
   process.env.JWT_SECRET ||
   process.env.API_SECRET;
-const WEBEX_CLIENT_ID =
-  process.env.WEBEX_CLIENT_ID;
 
-const WEBEX_CLIENT_SECRET =
-  process.env.WEBEX_CLIENT_SECRET;
-
-const WEBEX_REDIRECT_URI =
-  process.env.WEBEX_REDIRECT_URI;
-
-const WEBEX_SCOPES =
-  process.env.WEBEX_SCOPES || 'spark:all';
-
-let webexToken = null;
-let webexTokenExpiry = null;
 
 if (!JWT_SECRET) {
   throw new Error(
@@ -311,35 +298,6 @@ app.post('/checkin', async (req, res) => {
   }
 });
 
-app.get('/webex/auth', (req, res) => {
-  const url = `https://webexapis.com/v1/authorize?client_id=${WEBEX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(WEBEX_REDIRECT_URI)}&scope=${encodeURIComponent(WEBEX_SCOPES)}&state=mda`;
-  res.redirect(url);
-});
-
-app.get('/webex/callback', async (req, res) => {
-  const { code } = req.query;
-  if (!code) return res.status(400).send('Code manquant');
-  try {
-    const response = await fetch('https://webexapis.com/v1/access_token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type:    'authorization_code',
-        client_id:     WEBEX_CLIENT_ID,
-        client_secret: WEBEX_CLIENT_SECRET,
-        redirect_uri:  WEBEX_REDIRECT_URI,
-        code
-      })
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || 'Erreur OAuth');
-    webexToken = data.access_token;
-    webexTokenExpiry = Date.now() + (data.expires_in * 1000);
-    res.send(`<html><body style="font-family:sans-serif;padding:40px;text-align:center"><h2>✅ Webex connecté avec succès</h2><p>Vous pouvez fermer cette page.</p></body></html>`);
-  } catch (err) {
-    res.status(500).send(`Erreur: ${err.message}`);
-  }
-});
 app.use(webexRoutes);
 
 app.use(auth);
