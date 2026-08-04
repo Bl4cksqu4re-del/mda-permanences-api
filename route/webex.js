@@ -491,12 +491,21 @@ router.post('/webex/import/calls', auth, async (req, res) => {
       });
     }
 
+    const dateMin = rows.reduce((m, r) => !m || r.dateISO < m ? r.dateISO : m, null);
+    const dateMax = rows.reduce((m, r) => !m || r.dateISO > m ? r.dateISO : m, null);
+
     // Stockage brut, sans fusion : une ligne CSV = une ligne en base.
-    // Dédoublonnage par fichier source (pas par contenu) : plusieurs lignes distinctes peuvent
-    // légitimement partager (appelant, appelé, date, heure, durée) — vérifié sur données réelles,
-    // ~15 à 20% de collisions sur ces seuls champs. Un ré-import du même fichier remplace donc
-    // ses lignes plutôt que de tenter une déduplication au contenu, peu fiable.
-    const deleted = await pool.query(`DELETE FROM webex_calls WHERE source_file = $1`, [filename]);
+    // Dédoublonnage par PÉRIODE COUVERTE (pas par nom de fichier) : Orange nomme ses exports
+    // avec l'horodatage du téléchargement, pas la période — deux exports du même mois
+    // téléchargés à des jours différents auraient donc des noms différents. On remplace
+    // toutes les lignes déjà en base sur la période couverte par ce fichier, quel que soit
+    // son nom, pour que le ré-import (même sous un autre nom) remplace au lieu de dupliquer.
+    // Pas de déduplication au contenu ligne à ligne : vérifié sur données réelles, ~15-20%
+    // de lignes distinctes partagent (appelant, appelé, date, heure, durée), donc peu fiable.
+    const deleted = await pool.query(
+      `DELETE FROM webex_calls WHERE date_appel BETWEEN $1 AND $2`,
+      [dateMin, dateMax]
+    );
 
     const BATCH = 300;
     for (let i = 0; i < rows.length; i += BATCH) {
@@ -516,8 +525,6 @@ router.post('/webex/import/calls', auth, async (req, res) => {
       );
     }
 
-    const dateMin = rows.reduce((m, r) => !m || r.dateISO < m ? r.dateISO : m, null);
-    const dateMax = rows.reduce((m, r) => !m || r.dateISO > m ? r.dateISO : m, null);
 
     await pool.query(`
       INSERT INTO import_log (imported_by, filename, total, inserted, updated, date_min, date_max)
