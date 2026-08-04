@@ -929,6 +929,7 @@ app.post('/timesheet/lock', auth, async (req, res) => {
 
 // Vue admin : liste de tous les salariés avec résumé du mois
 app.get('/timesheet/admin/summary', auth, adminOnly, async (req, res) => {
+
   const { mois } = req.query;
   if (!mois) return res.status(400).json({ error: 'Mois requis' });
   try {
@@ -941,18 +942,30 @@ app.get('/timesheet/admin/summary', auth, adminOnly, async (req, res) => {
       ]);
       const totalReg = entries.rows.reduce((s,e) => s + parseFloat(e.heures_reg||0), 0);
       const totalSup = entries.rows.reduce((s,e) => s + parseFloat(e.heures_sup||0), 0);
+      const ecart =
+  Math.round(
+    (
+      (totalReg + totalSup)
+      - parseFloat(u.heures_contrat_mois)
+    ) * 100
+  ) / 100;
       const totalSaisi = entries.rows.length;
       const motifsCount = {};
       entries.rows.forEach(e => { if (e.motif) motifsCount[e.motif] = (motifsCount[e.motif]||0) + 1; });
-      results.push({
-        user_id: u.id, display_name: u.display_name, initiales: u.initiales,
-        heures_contrat_mois: parseFloat(u.heures_contrat_mois),
-        heures_semaine_base: parseFloat(u.heures_semaine_base) || 35,
-        jours_semaine_base: parseFloat(u.jours_semaine_base) || 5,
-        total_reg: Math.round(totalReg*100)/100, total_sup: Math.round(totalSup*100)/100,
-        jours_saisis: totalSaisi, locked: lock.rows.length > 0 ? lock.rows[0].locked : false,
-        motifs: motifsCount
-      });
+     results.push({
+  user_id: u.id,
+  display_name: u.display_name,
+  initiales: u.initiales,
+  heures_contrat_mois: parseFloat(u.heures_contrat_mois),
+
+  total_reg: Math.round(totalReg*100)/100,
+  total_sup: Math.round(totalSup*100)/100,
+  ecart,
+
+  jours_saisis: totalSaisi,
+  locked: lock.rows.length > 0 ? lock.rows[0].locked : false,
+  motifs: motifsCount
+});
     }
     res.json(results);
   } catch (err) {
