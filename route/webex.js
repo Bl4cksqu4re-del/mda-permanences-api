@@ -91,14 +91,116 @@ function dateDepuisNomFichier(filename) {
  */
 router.get('/webex/stats', auth, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT COUNT(*) AS total
-      FROM webex_group_stats
+    const { from, to } = req.query;
+
+    const bounds = await pool.query(`
+      SELECT MIN(d) AS min_date, MAX(d) AS max_date FROM (
+        SELECT stat_date AS d FROM webex_group_stats
+        UNION ALL
+        SELECT stat_date AS d FROM webex_agent_stats
+      ) t
     `);
+    const lastImportRes = await pool.query(`SELECT MAX(imported_at) AS last_import FROM import_log`);
+    const { min_date, max_date } = bounds.rows[0];
+    const { last_import } = lastImportRes.rows[0];
+
+    const periodeFrom = from || min_date;
+    const periodeTo = to || max_date;
+
+    if (!periodeFrom || !periodeTo) {
+      return res.json({
+        periode: { from: null, to: null },
+        total: 0, answered: 0, abandoned: 0,
+        overflow: 0, transferred: 0, timed: 0,
+        tauxDecroche: 0, attenteMoy: null, dureeMoy: null,
+        parHeure: [], parJour: [], parAgent: [],
+        lastImport: last_import, dataRange: { min: min_date, max: max_date }
+      });
+    }
+
+    const [totaux, parHeure, parJour, parAgent] = await Promise.all([
+      pool.query(`
+        SELECT
+          COALESCE(SUM(answered),0) AS answered,
+          COALESCE(SUM(abandoned),0) AS abandoned,
+          COALESCE(SUM(overflow_calls),0) AS overflow,
+          COALESCE(SUM(transferred_calls),0) AS transferred,
+          COALESCE(SUM(timed_calls),0) AS timed,
+          SUM(avg_wait_sec * (answered+abandoned)) / NULLIF(SUM(answered+abandoned),0) AS attente_moy
+        FROM webex_group_stats
+        WHERE stat_date BETWEEN $1 AND $2
+      `, [periodeFrom, periodeTo]),
+      pool.query(`
+        SELECT stat_hour,
+          SUM(answered) AS answered, SUM(abandoned) AS abandoned,
+          SUM(overflow_calls) AS overflow, SUM(transferred_calls) AS transferred, SUM(timed_calls) AS timed
+        FROM webex_group_stats
+        WHERE stat_date BETWEEN $1 AND $2
+        GROUP BY stat_hour ORDER BY stat_hour
+      `, [periodeFrom, periodeTo]),
+      pool.query(`
+        SELECT stat_date,
+          SUM(answered) AS answered, SUM(abandoned) AS abandoned,
+          SUM(overflow_calls) AS overflow, SUM(transferred_calls) AS transferred, SUM(timed_calls) AS timed,
+          SUM(avg_wait_sec * (answered+abandoned)) / NULLIF(SUM(answered+abandoned),0) AS attente_moy
+        FROM webex_group_stats
+        WHERE stat_date BETWEEN $1 AND $2
+        GROUP BY stat_date ORDER BY stat_date DESC
+      `, [periodeFrom, periodeTo]),
+      pool.query(`
+        SELECT agent_name,
+          SUM(calls_answered) AS calls_answered,
+          SUM(calls_unanswered) AS calls_unanswered,
+          SUM(avg_call_sec * calls_answered) / NULLIF(SUM(calls_answered),0) AS avg_call_sec,
+          SUM(talk_time_sec) AS talk_time_sec,
+          SUM(presence_time_sec) AS presence_time_sec
+        FROM webex_agent_stats
+        WHERE stat_date BETWEEN $1 AND $2
+        GROUP BY agent_name ORDER BY calls_answered DESC
+      `, [periodeFrom, periodeTo])
+    ]);
+
+    const t = totaux.rows[0];
+    const answered = parseInt(t.answered) || 0;
+    const abandoned = parseInt(t.abandoned) || 0;
+    const overflow = parseInt(t.overflow) || 0;
+    const transferred = parseInt(t.transferred) || 0;
+    const timed = parseInt(t.timed) || 0;
+    const total = answered + abandoned + overflow + transferred + timed;
+
+    const talkTimeTotal = parAgent.rows.reduce((s, a) => s + (parseInt(a.talk_time_sec) || 0), 0);
+    const callsAnsweredTotal = parAgent.rows.reduce((s, a) => s + (parseInt(a.calls_answered) || 0), 0);
 
     res.json({
-      ok: true,
-      total: parseInt(result.rows[0].total)
+      periode: { from: periodeFrom, to: periodeTo },
+      total, answered, abandoned, overflow, transferred, timed,
+      tauxDecroche: total > 0 ? Math.round((answered / total) * 100) : 0,
+      attenteMoy: t.attente_moy != null ? Math.round(parseFloat(t.attente_moy)) : null,
+      dureeMoy: callsAnsweredTotal > 0 ? Math.round(talkTimeTotal / callsAnsweredTotal) : null,
+      parHeure: parHeure.rows.map(r => ({
+        heure: r.stat_hour,
+        total: (parseInt(r.answered)||0) + (parseInt(r.abandoned)||0) + (parseInt(r.overflow)||0) + (parseInt(r.transferred)||0) + (parseInt(r.timed)||0),
+        answered: parseInt(r.answered) || 0
+      })),
+      parJour: parJour.rows.map(r => {
+        const jAnswered = parseInt(r.answered) || 0, jAbandoned = parseInt(r.abandoned) || 0;
+        const jTotal = jAnswered + jAbandoned + (parseInt(r.overflow)||0) + (parseInt(r.transferred)||0) + (parseInt(r.timed)||0);
+        return {
+          date: r.stat_date.toISOString().slice(0, 10),
+          total: jTotal, answered: jAnswered, abandoned: jAbandoned,
+          attenteMoy: r.attente_moy != null ? Math.round(parseFloat(r.attente_moy)) : null
+        };
+      }),
+      parAgent: parAgent.rows.map(a => ({
+        nom: a.agent_name,
+        appelsTraites: parseInt(a.calls_answered) || 0,
+        appelsSansReponse: parseInt(a.calls_unanswered) || 0,
+        dureeMoy: a.avg_call_sec != null ? Math.round(parseFloat(a.avg_call_sec)) : null,
+        tempsConversation: parseInt(a.talk_time_sec) || 0,
+        tempsPresence: parseInt(a.presence_time_sec) || 0
+      })),
+      lastImport: last_import,
+      dataRange: { min: min_date, max: max_date }
     });
   } catch (err) {
     res.status(500).json({
