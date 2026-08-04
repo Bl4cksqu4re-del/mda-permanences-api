@@ -993,10 +993,14 @@ app.get('/timesheet/admin/summary', auth, adminOnly, async (req, res) => {
   user_id: u.id,
   display_name: u.display_name,
   initiales: u.initiales,
-  heures_contrat_mois: parseFloat(u.heures_contrat_mois),
 
-  total_reg: Math.round(totalReg*100)/100,
-  total_sup: Math.round(totalSup*100)/100,
+  heures_contrat_mois: parseFloat(u.heures_contrat_mois),
+  heures_semaine_base: parseFloat(u.heures_semaine_base),
+  jours_semaine_base: parseFloat(u.jours_semaine_base),
+  planning_base: u.planning_base,
+
+  total_reg: Math.round(totalReg * 100) / 100,
+  total_sup: Math.round(totalSup * 100) / 100,
   ecart,
 
   jours_saisis: totalSaisi,
