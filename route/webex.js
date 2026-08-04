@@ -36,13 +36,32 @@ router.get('/webex/test', (req, res) => {
 /*
  * IMPORTS
  */
-router.post('/webex/import/group', (req, res) => {
-  res.json({
-    ok: true,
-    message: 'Import groupe'
-  });
-});
+router.post('/webex/import/group', async (req, res) => {
+  try {
 
+    const { csv } = req.body;
+
+    if (!csv) {
+      return res.status(400).json({
+        error: 'CSV manquant'
+      });
+    }
+
+    const lines = csv
+      .split('\n')
+      .filter(l => l.trim());
+
+    res.json({
+      ok: true,
+      lignes: lines.length
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      error: err.message
+    });
+  }
+});
 router.post('/webex/import/agents', (req, res) => {
   res.json({
     ok: true,
