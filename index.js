@@ -6,6 +6,7 @@ const cors = require('cors');
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const ExcelJS = require('exceljs');
 
 const app = express();
 app.use(cors({
@@ -98,33 +99,30 @@ app.post('/login', async (req, res) => {
 
     let validPassword = false;
 
-if (user.password_hash.startsWith('$2')) {
-  validPassword = await bcrypt.compare(
-    password,
-    user.password_hash
-  );
-} else {
-  validPassword =
-    user.password_hash ===
-    legacyHashPassword(password);
+    if (user.password_hash.startsWith('$2')) {
+      validPassword = await bcrypt.compare(
+        password,
+        user.password_hash
+      );
+    } else {
+      validPassword =
+        user.password_hash ===
+        legacyHashPassword(password);
 
-  if (validPassword) {
-    const newHash = await hashPassword(
-      password
-    );
+      if (validPassword) {
+        const newHash = await hashPassword(password);
 
-    await pool.query(
-      'UPDATE users SET password_hash=$1 WHERE id=$2',
-      [newHash, user.id]
-    );
-  }
-}
+        await pool.query(
+          'UPDATE users SET password_hash=$1 WHERE id=$2',
+          [newHash, user.id]
+        );
+      }
+    }
 
-if (!validPassword) {
-  return res.status(401).json({
-    error: 'Identifiant ou mot de passe incorrect'
-  });
-}
+    if (!validPassword) {
+      return res.status(401).json({
+        error: 'Identifiant ou mot de passe incorrect'
+      });
     }
 
     const token = jwt.sign(
@@ -149,6 +147,7 @@ if (!validPassword) {
         is_admin: user.is_admin
       }
     });
+
   } catch (err) {
     res.status(500).json({
       error: err.message
