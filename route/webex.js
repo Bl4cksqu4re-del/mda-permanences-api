@@ -1,23 +1,36 @@
 const express = require('express');
+const pool = require('../db');
 
 const router = express.Router();
 
 console.log('WEBEX ROUTES LOADED');
 
 /*
- * TEST
+ * TEST / STATS
  */
 router.get('/webex/stats', async (req, res) => {
   try {
+    const result = await pool.query(`
+      SELECT COUNT(*) AS total
+      FROM webex_group_stats
+    `);
+
     res.json({
       ok: true,
-      source: 'webex_group_stats'
+      total: parseInt(result.rows[0].total)
     });
   } catch (err) {
     res.status(500).json({
       error: err.message
     });
   }
+});
+
+router.get('/webex/test', (req, res) => {
+  res.json({
+    ok: true,
+    message: 'Webex fonctionne'
+  });
 });
 
 /*
@@ -41,16 +54,6 @@ router.post('/webex/import/calls', (req, res) => {
   res.json({
     ok: true,
     message: 'Import appels'
-  });
-});
-
-/*
- * STATS
- */
-router.get('/webex/stats', (req, res) => {
-  res.json({
-    ok: true,
-    message: 'Stats Webex'
   });
 });
 
