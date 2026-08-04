@@ -22,8 +22,8 @@ const pool = new Pool({
 
 const JWT_SECRET = process.env.JWT_SECRET || process.env.API_SECRET || 'mda-secret-2026';
 
-function hashPassword(pwd) {
-  return crypto.createHash('sha256').update(pwd).digest('hex');
+async function hashPassword(password) {
+  return bcrypt.hash(password, 12);
 }
 
 function auth(req, res, next) {
